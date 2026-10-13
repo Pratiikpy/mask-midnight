@@ -1,0 +1,914 @@
+// Mask — private invoices with public proof.
+//
+// Design rationale lives in docs/MIDNIGHT_PHASE1_DOMAIN_MODEL.md. The short
+// version, because it is the reason this file looks the way it does:
+//
+// A commitment built as H(merchant) + H(amount) + H(salt) with the salt
+// published is broken: addition is invertible, so anyone can compute
+// commitment - H(salt) and obtain a value that depends only on (merchant,
+// amount). Equal pairs become linkable with no brute force, and the amount
+// becomes recoverable by dictionary once the merchant is known.
+//
+// This contract does neither. Every commitment is a single hash over a joint
+// pre-image with a domain separator, and the salt is a witness that is never
+// disclosed. The compiler enforces the second property: a witness-derived
+// value cannot reach a public boundary without an explicit disclose().
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+// Schnorr verification over Jubjub, vendored from midnightntwrk/example-zkloan
+// under Apache-2.0. See src/vendor/schnorr.compact.
+import "vendor/schnorr" prefix Schnorr_;
+
+// ---------------------------------------------------------------------------
+// Domain separators
+//
+// Every hash in this contract is tagged so a digest produced for one purpose
+// can never be replayed as another. Without these, an invoice commitment and a
+// payment nullifier would be values of the same type and shape.
+// ---------------------------------------------------------------------------
+
+// Written as pure circuits rather than top-level constants: at language
+// version 0.23 a bare `const` is not a valid program element.
+circuit domain_invoice():  Bytes<32> { return pad(32, "mask:invoice:v1"); }
+circuit domain_settle():   Bytes<32> { return pad(32, "mask:settle:v1"); }
+circuit domain_merchant(): Bytes<32> { return pad(32, "mask:merchant:v1"); }
+circuit domain_receipt():  Bytes<32> { return pad(32, "mask:receipt:v1"); }
+circuit domain_owner():    Bytes<32> { return pad(32, "mask:owner:v1"); }
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+export enum InvoiceStatus {
+  OPEN,      // accepting settlement
+  SETTLED,   // fully paid
+  CANCELLED  // withdrawn by the merchant
+}
+
+// Standard settles once and closes. Multipay accepts many contributors until
+// the merchant closes it. Donation is multipay with no expectation of a total.
+export enum InvoiceKind {
+  STANDARD,
+  MULTIPAY,
+  DONATION
+}
+
+// Settlement asset. Native is tNIGHT; MUSDC and MUSAD are the Mask-issued
+// shielded reference tokens introduced in Phase 3. The token is part of the
+// commitment pre-image, so an invoice cannot be settled in an asset other than
+// the one it was created for.
+export enum TokenKind {
+  NATIVE,
+  MUSDC,
+  MUSAD
+}
+
+// What the ledger holds per invoice. Deliberately minimal: everything here is
+// public forever, so it carries only what a third party must be able to check.
+//
+// Note what is absent: amount, merchant, payer, token issuer, title, memo.
+export struct InvoiceState {
+  status: InvoiceStatus,
+  kind: InvoiceKind,
+  token: TokenKind,
+  // Absolute block time after which settlement is refused. Zero means never
+  // expires.
+  expires_at: Uint<64>,
+  // How many settlements have landed. A count, never the amounts: a multipay
+  // invoice's progress is visible as "3 people paid", not "3 people paid X".
+  contributions: Uint<32>,
+  // Commitment to a secret only the merchant holds, one per invoice. Closing and
+  // cancelling are authorised against it, never against the invoice terms:
+  // those travel in the payment link, so anyone who can pay can reproduce them.
+  owner: Bytes<32>
+}
+
+// ---------------------------------------------------------------------------
+// Ledger
+// ---------------------------------------------------------------------------
+
+// commitment => state. The key IS the commitment: there is no secondary index,
+// so there is no salt-to-invoice mapping to publish and nothing to correlate.
+export ledger invoices: Map<Bytes<32>, InvoiceState>;
+
+// Spent payment authorisations. This is the authoritative replay guard —
+// status is a convenience check, not the security boundary, because status
+// alone cannot protect a multipay invoice that legitimately stays OPEN.
+export ledger spent: Set<Bytes<32>>;
+
+// Public receipt digests. A payer can prove a specific payment happened without
+// revealing what it was worth or who paid. The digest alone says nothing about
+// its invoice, but the settling transaction also touches the invoice's
+// commitment, so an observer can pair the two (measured in
+// test/privacy-observer.test.ts). The commitment is an opaque hash.
+export ledger receipts: Set<Bytes<32>>;
+
+// The same receipts as a Merkle tree, which is what makes selective disclosure
+// possible. Insert hides the leaf — the compiler applies leaf_hash() first, so
+// only a hash reaches the transcript — and a ZK path proof later shows that
+// *some* leaf is a member without revealing which one.
+//
+// Historic rather than plain: a plain MerkleTree invalidates every outstanding
+// proof on the next insert, which would break the moment a second payment
+// arrived.
+export ledger receipt_tree: HistoricMerkleTree<10, Bytes<32>>;
+
+// Published attestations. Each is a digest of a statement a merchant proved
+// about their own revenue. The statement is verifiable; the revenue is not.
+export ledger attestations: Set<Bytes<32>>;
+
+// Total invoices ever created. The one aggregate we deliberately publish —
+// the transparency half of the dual ledger.
+export ledger created: Counter;
+
+// The oracle's Jubjub public key, used to verify conversion quotes.
+//
+// `sealed` means it is written once by the constructor and can never be
+// changed afterwards — nobody, including the deployer, can swap the oracle for
+// one that signs favourable rates.
+export sealed ledger oracle_pk: JubjubPoint;
+
+// The colours of the two reference assets, sealed the same way.
+//
+// A shielded coin carries a colour, and until these were here nothing tied that
+// colour to the asset an invoice was denominated in: a 100 mUSDC invoice could
+// be settled with 100 tNIGHT, and a converted settlement could be paid in an
+// asset the quote was never about. The value check passed in both cases,
+// because value and colour are separate fields.
+//
+// Sealed rather than settable, for the same reason as the oracle key. If these
+// could be changed later, every invoice ever denominated in mUSDC could be
+// re-pointed at a worthless asset by whoever holds that power.
+export sealed ledger musdc_color: Bytes<32>;
+export sealed ledger musad_color: Bytes<32>;
+
+constructor(oracle_public_key: JubjubPoint, musdc: Bytes<32>, musad: Bytes<32>) {
+  oracle_pk = disclose(oracle_public_key);
+  musdc_color = disclose(musdc);
+  musad_color = disclose(musad);
+}
+
+// The colour a coin must have to settle an invoice denominated in `token`.
+//
+// NATIVE resolves to the ledger's own native token rather than to anything
+// Mask controls, so a tNIGHT invoice is settled in real tNIGHT.
+//
+// The token must be disclosed at the call site. Reading one of two sealed
+// ledger fields depending on it reveals which branch was taken, and the
+// compiler refuses that without an explicit disclosure — correctly. The value
+// is already public: it is written into the invoice record by create_invoice.
+circuit expected_color(token: TokenKind): Bytes<32> {
+  return token == TokenKind.NATIVE
+    ? nativeToken()
+    : (token == TokenKind.MUSDC ? musdc_color : musad_color);
+}
+
+// ---------------------------------------------------------------------------
+// Witnesses — private inputs, supplied by the caller's own machine.
+//
+// None of these are transmitted. They are PLONK private inputs, and the
+// Witness Protection Program makes it a compile error for any of them to reach
+// the ledger without an explicit disclose().
+// ---------------------------------------------------------------------------
+
+// The merchant's identity key. Not an address, and not an authority: the
+// payment link carries it, because a payer must reproduce the commitment to
+// settle. Authority to close or cancel comes from owner_secret() below.
+witness merchant_key(): Bytes<32>;
+
+// Per-invoice randomness. 256 bits, uniformly random, never disclosed. This is
+// the value whose publication would make equal invoices linkable.
+witness invoice_salt(): Bytes<32>;
+
+// The amount. Never disclosed, in any circuit, ever.
+witness invoice_amount(): Uint<64>;
+
+// The payer's identity key, so multipay contributors produce distinct
+// nullifiers and no single payer can settle twice under one index.
+witness payer_key(): Bytes<32>;
+
+// Distinguishes deliberate repeat contributions to a multipay or donation
+// invoice from a replay of the same one. Pinned to 0 for STANDARD.
+witness payment_index(): Uint<32>;
+
+// The merchant's per-invoice ownership secret. It is never part of the payment
+// link, so a payer cannot reproduce it. Fresh and random for every invoice:
+// reusing one would let anyone link a merchant's invoices by their public tag.
+witness owner_secret(): Bytes<32>;
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+// Fold a Uint<64> into a Bytes<32> so it can join a hash vector.
+circuit hash_amount(amount: Uint<64>): Bytes<32> {
+  return persistentHash<Uint<64>>(amount);
+}
+
+// Fold the two public-facing enums into one digest.
+circuit hash_terms(kind: InvoiceKind, token: TokenKind): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([
+    persistentHash<Uint<8>>(kind as Uint<8>),
+    persistentHash<Uint<8>>(token as Uint<8>)
+  ]);
+}
+
+// The invoice commitment.
+//
+// One hash over a joint pre-image, domain-separated. There is no algebraic
+// structure here to invert and no term that can be subtracted out, which is
+// precisely the property an additive construction lacks. Binding the amount, the
+// merchant and the terms together also means an invoice cannot be settled on
+// altered terms — reproducing the commitment requires reproducing all of them.
+circuit invoice_commitment(
+  merchant: Bytes<32>,
+  amount: Uint<64>,
+  kind: InvoiceKind,
+  token: TokenKind,
+  salt: Bytes<32>
+): Bytes<32> {
+  return persistentHash<Vector<5, Bytes<32>>>([
+    domain_invoice(),
+    persistentHash<Vector<2, Bytes<32>>>([domain_merchant(), merchant]),
+    hash_amount(amount),
+    hash_terms(kind, token),
+    salt
+  ]);
+}
+
+// One-time settlement authorisation.
+//
+// Domain-separated from the invoice commitment so neither can stand in for the
+// other. Bound to the payer and to an index, which is what lets many people
+// settle one multipay invoice while none of them can pay twice under the same
+// index.
+circuit settle_nullifier(
+  commitment: Bytes<32>,
+  payer: Bytes<32>,
+  index: Uint<32>
+): Bytes<32> {
+  return persistentHash<Vector<4, Bytes<32>>>([
+    domain_settle(),
+    commitment,
+    payer,
+    persistentHash<Uint<32>>(index)
+  ]);
+}
+
+// A payment receipt digest, publishable as proof that a payment occurred
+// without revealing its amount or the payer.
+circuit receipt_digest(
+  commitment: Bytes<32>,
+  payer: Bytes<32>,
+  index: Uint<32>
+): Bytes<32> {
+  return persistentHash<Vector<4, Bytes<32>>>([
+    domain_receipt(),
+    commitment,
+    payer,
+    persistentHash<Uint<32>>(index)
+  ]);
+}
+
+// The public tag an ownership secret hashes to. Domain-separated, so the tag
+// cannot be confused with any other digest in this contract.
+circuit owner_tag(secret: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([domain_owner(), secret]);
+}
+
+// Reconstruct this caller's commitment from their own private state.
+// Reproducing it is the proof of knowledge — it stands in for a signature.
+circuit own_commitment(kind: InvoiceKind, token: TokenKind): Bytes<32> {
+  return invoice_commitment(
+    merchant_key(),
+    invoice_amount(),
+    kind,
+    token,
+    invoice_salt()
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Circuits
+// ---------------------------------------------------------------------------
+
+// Create an invoice.
+//
+// `kind`, `token` and `expires_at` are ordinary parameters rather than
+// witnesses: they end up in public ledger state anyway, so hiding them in the
+// circuit would be theatre. The amount, merchant and salt never leave the
+// caller's machine.
+//
+// Returns the commitment, which is the invoice's public identifier.
+export circuit create_invoice(
+  kind: InvoiceKind,
+  token: TokenKind,
+  expires_at: Uint<64>
+): Bytes<32> {
+  const commitment = disclose(own_commitment(kind, token));
+
+  assert(!invoices.member(commitment), "invoice already exists");
+
+  // kind, token and expires_at are exported circuit parameters, which Compact
+  // treats as private by default. Publishing them is deliberate — they are the
+  // terms a third party must be able to check — so the disclosure is explicit.
+  invoices.insert(commitment, disclose(InvoiceState {
+    status: InvoiceStatus.OPEN,
+    kind: kind,
+    token: token,
+    expires_at: expires_at,
+    contributions: 0,
+    owner: owner_tag(owner_secret())
+  }));
+
+  created.increment(1);
+  return commitment;
+}
+
+// Settle an invoice.
+//
+// The payer reproduces the commitment from the invoice terms they were given
+// out of band. Succeeding proves they know the real merchant, amount and salt
+// — without any of the three appearing anywhere. A wrong amount produces a
+// different commitment and simply fails to match an open invoice.
+//
+// STANDARD closes on first settlement. MULTIPAY and DONATION stay OPEN and
+// accumulate contributions until the merchant closes them.
+export circuit settle_invoice(
+  kind: InvoiceKind,
+  token: TokenKind
+): Bytes<32> {
+  const commitment = disclose(own_commitment(kind, token));
+
+  assert(invoices.member(commitment), "unknown invoice");
+  const state = invoices.lookup(commitment);
+
+  assert(state.status == InvoiceStatus.OPEN, "invoice is not open");
+
+  // expires_at of zero means no expiry.
+  if (state.expires_at != 0) {
+    assert(blockTimeLt(state.expires_at), "invoice has expired");
+  }
+
+  // A STANDARD invoice permits exactly one settlement, so its index is pinned.
+  // Allowing a caller-chosen index there would let one payer mint unlimited
+  // distinct nullifiers against a single-settlement invoice.
+  const index = disclose(
+    kind == InvoiceKind.STANDARD ? 0 as Uint<32> : payment_index()
+  );
+
+  const payer = payer_key();
+  const nullifier = disclose(settle_nullifier(commitment, payer, index));
+  assert(!spent.member(nullifier), "payment already settled");
+  spent.insert(nullifier);
+
+  const receipt = disclose(receipt_digest(commitment, payer, index));
+  receipts.insert(receipt);
+  receipt_tree.insert(receipt);
+
+  invoices.insert(commitment, disclose(InvoiceState {
+    // STANDARD closes immediately; the others stay open for more contributors.
+    status: kind == InvoiceKind.STANDARD ? InvoiceStatus.SETTLED : InvoiceStatus.OPEN,
+    kind: state.kind,
+    token: state.token,
+    expires_at: state.expires_at,
+    contributions: (state.contributions + 1) as Uint<32>,
+    owner: state.owner
+  }));
+
+  return receipt;
+}
+
+// Close a multipay or donation invoice.
+//
+// Only the merchant can do this. Reproducing the commitment is not enough, since
+// a payer can do that from the payment link; the caller must also hold the
+// ownership secret the invoice was created with.
+export circuit close_invoice(
+  kind: InvoiceKind,
+  token: TokenKind
+): [] {
+  const commitment = disclose(own_commitment(kind, token));
+
+  assert(invoices.member(commitment), "unknown invoice");
+  const state = invoices.lookup(commitment);
+  assert(state.status == InvoiceStatus.OPEN, "invoice is not open");
+  assert(owner_tag(owner_secret()) == state.owner, "not the invoice owner");
+
+  invoices.insert(commitment, disclose(InvoiceState {
+    status: InvoiceStatus.SETTLED,
+    kind: state.kind,
+    token: state.token,
+    expires_at: state.expires_at,
+    contributions: state.contributions,
+    owner: state.owner
+  }));
+}
+
+// Cancel an unpaid invoice. Merchant only, and refused once anyone has paid —
+// cancelling out from under a payer who has already settled would be theft.
+export circuit cancel_invoice(
+  kind: InvoiceKind,
+  token: TokenKind
+): [] {
+  const commitment = disclose(own_commitment(kind, token));
+
+  assert(invoices.member(commitment), "unknown invoice");
+  const state = invoices.lookup(commitment);
+  assert(state.status == InvoiceStatus.OPEN, "invoice is not open");
+  assert(state.contributions == 0, "invoice has contributions");
+  assert(owner_tag(owner_secret()) == state.owner, "not the invoice owner");
+
+  invoices.insert(commitment, disclose(InvoiceState {
+    status: InvoiceStatus.CANCELLED,
+    kind: state.kind,
+    token: state.token,
+    expires_at: state.expires_at,
+    contributions: state.contributions,
+    owner: state.owner
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Public read paths
+//
+// These take a commitment directly, so anyone holding an invoice reference can
+// check it. They reveal nothing beyond what the ledger already shows.
+// ---------------------------------------------------------------------------
+
+export circuit invoice_exists(commitment: Bytes<32>): Boolean {
+  return invoices.member(disclose(commitment));
+}
+
+export circuit is_settled(commitment: Bytes<32>): Boolean {
+  const key = disclose(commitment);
+  if (!invoices.member(key)) {
+    return false;
+  }
+  return invoices.lookup(key).status == InvoiceStatus.SETTLED;
+}
+
+// Proves a specific payment happened, without revealing its amount or the payer.
+export circuit receipt_exists(receipt: Bytes<32>): Boolean {
+  return receipts.member(disclose(receipt));
+}
+
+// ---------------------------------------------------------------------------
+// Escrowed settlement — moves real value.
+//
+// settle_invoice above records that a payment happened. This circuit also
+// moves the coin, and refuses to record anything unless the coin's value
+// equals the amount the invoice was committed to.
+//
+// The equality check runs on two private values — the coin's value and the
+// witness amount — so the comparison itself discloses nothing. Whether the
+// subsequent send puts the value or the recipient into the public transcript
+// is verified empirically against the chain, not assumed from documentation.
+// ---------------------------------------------------------------------------
+
+// The coin is an unqualified ShieldedCoinInfo, not a Qualified one. That is
+// not cosmetic: sendShielded spends a coin the CONTRACT already owns, and
+// handing it a payer's wallet coin fails at proving time with
+// "invalid index into sparse merkle tree ... ZswapInput.newContractOwned".
+// Escrow here is receive-then-forward — the payer's coin enters the contract
+// in this transaction and is forwarded on in the same transaction, so the
+// contract never custodies funds across blocks.
+export circuit settle_invoice_shielded(
+  kind: InvoiceKind,
+  token: TokenKind,
+  coin: ShieldedCoinInfo,
+  merchant_addr: ZswapCoinPublicKey
+): Bytes<32> {
+  const commitment = disclose(own_commitment(kind, token));
+
+  assert(invoices.member(commitment), "unknown invoice");
+  const state = invoices.lookup(commitment);
+  assert(state.status == InvoiceStatus.OPEN, "invoice is not open");
+
+  if (state.expires_at != 0) {
+    assert(blockTimeLt(state.expires_at), "invoice has expired");
+  }
+
+  // The coin must be worth exactly what the invoice committed to. Both sides
+  // are private, so an underpayment is rejected without either value ever
+  // becoming public.
+  assert(coin.value == invoice_amount() as Uint<128>, "coin value does not match invoice");
+
+  // …and it must be the right asset. Value alone is not payment: a coin worth
+  // 100 of something else is not 100 mUSDC.
+  assert(coin.color == expected_color(disclose(token)), "coin is not the invoice's asset");
+
+  const index = disclose(
+    kind == InvoiceKind.STANDARD ? 0 as Uint<32> : payment_index()
+  );
+  const payer = payer_key();
+  const nullifier = disclose(settle_nullifier(commitment, payer, index));
+  assert(!spent.member(nullifier), "payment already settled");
+  spent.insert(nullifier);
+
+  const receipt = disclose(receipt_digest(commitment, payer, index));
+  receipts.insert(receipt);
+  receipt_tree.insert(receipt);
+
+  invoices.insert(commitment, disclose(InvoiceState {
+    status: kind == InvoiceKind.STANDARD ? InvoiceStatus.SETTLED : InvoiceStatus.OPEN,
+    kind: state.kind,
+    token: state.token,
+    expires_at: state.expires_at,
+    contributions: (state.contributions + 1) as Uint<32>,
+    owner: state.owner
+  }));
+
+  // Accept the payer's coin, then forward the whole of it to the merchant in
+  // the same transaction. Both legs are shielded, so neither the value nor the
+  // parties appear in the public transcript.
+  receiveShielded(disclose(coin));
+  sendImmediateShielded(
+    disclose(coin),
+    left<ZswapCoinPublicKey, ContractAddress>(disclose(merchant_addr)),
+    disclose(coin.value)
+  );
+
+  return receipt;
+}
+
+// ---------------------------------------------------------------------------
+// Oracle-verified cross-token settlement.
+//
+// A payer settles an invoice denominated in one asset using a different one.
+// The conversion is not trusted as an off-chain number: the oracle signs a
+// quote, and the circuit verifies that signature over a digest built from the
+// private amounts. The rate is therefore proven inside the proof, while the
+// amounts themselves never become public.
+//
+// The oracle's public key is sealed at construction, so it cannot be swapped
+// out after deployment.
+// ---------------------------------------------------------------------------
+
+// The converted amount the payer actually hands over, in the settlement asset.
+// Private, like every other amount in this contract.
+witness converted_amount(): Uint<64>;
+
+// The quote digest the oracle signed. Built from private values, so verifying
+// it proves the oracle attested to *these* terms without publishing them.
+circuit quote_digest(
+  base_amount: Uint<64>,
+  converted: Uint<64>,
+  from_token: TokenKind,
+  to_token: TokenKind,
+  expires_at: Uint<64>
+): Vector<4, Field> {
+  // transientHash returns a Field directly. Casting a Bytes<32> digest to
+  // Field instead can exceed the BLS12-381 scalar prime and fails at runtime
+  // with "out of bounds for prime field".
+  return [
+    transientHash<Uint<64>>(base_amount),
+    transientHash<Uint<64>>(converted),
+    transientHash<Vector<2, Uint<8>>>([from_token as Uint<8>, to_token as Uint<8>]),
+    expires_at as Field
+  ];
+}
+
+export circuit settle_invoice_converted(
+  kind: InvoiceKind,
+  invoice_token: TokenKind,
+  paid_token: TokenKind,
+  coin: ShieldedCoinInfo,
+  merchant_addr: ZswapCoinPublicKey,
+  quote_expires_at: Uint<64>,
+  signature: Schnorr_SchnorrSignature
+): Bytes<32> {
+  // The commitment is over the invoice's own token, not the one being paid —
+  // conversion must not let a payer settle a different invoice.
+  const commitment = disclose(own_commitment(kind, invoice_token));
+
+  assert(invoices.member(commitment), "unknown invoice");
+  const state = invoices.lookup(commitment);
+  assert(state.status == InvoiceStatus.OPEN, "invoice is not open");
+
+  if (state.expires_at != 0) {
+    assert(blockTimeLt(state.expires_at), "invoice has expired");
+  }
+
+  // A stale quote is refused. Without this a payer could hold a favourable
+  // quote indefinitely and settle at an old rate.
+  // Disclosed deliberately: comparing against block time reveals a bound on the
+  // value, and a quote's expiry carries no information about amounts or parties.
+  assert(blockTimeLt(disclose(quote_expires_at)), "quote has expired");
+
+  // Prove the oracle signed exactly these terms.
+  const converted = converted_amount();
+  Schnorr_schnorrVerify<4>(
+    quote_digest(invoice_amount(), converted, invoice_token, paid_token, quote_expires_at),
+    signature,
+    oracle_pk
+  );
+
+  // The coin must be worth the converted amount the oracle attested to.
+  assert(coin.value == converted as Uint<128>, "coin value does not match quote");
+
+  // The quote says how much of `paid_token` settles this invoice. The coin has
+  // to actually be that asset, or the conversion proves nothing about what
+  // changed hands.
+  assert(coin.color == expected_color(disclose(paid_token)), "coin is not the asset the quote priced");
+
+  const index = disclose(
+    kind == InvoiceKind.STANDARD ? 0 as Uint<32> : payment_index()
+  );
+  const payer = payer_key();
+  const nullifier = disclose(settle_nullifier(commitment, payer, index));
+  assert(!spent.member(nullifier), "payment already settled");
+  spent.insert(nullifier);
+
+  const receipt = disclose(receipt_digest(commitment, payer, index));
+  receipts.insert(receipt);
+  receipt_tree.insert(receipt);
+
+  invoices.insert(commitment, disclose(InvoiceState {
+    status: kind == InvoiceKind.STANDARD ? InvoiceStatus.SETTLED : InvoiceStatus.OPEN,
+    kind: state.kind,
+    token: state.token,
+    expires_at: state.expires_at,
+    contributions: (state.contributions + 1) as Uint<32>,
+    owner: state.owner
+  }));
+
+  receiveShielded(disclose(coin));
+  sendImmediateShielded(
+    disclose(coin),
+    left<ZswapCoinPublicKey, ContractAddress>(disclose(merchant_addr)),
+    disclose(coin.value)
+  );
+
+  return receipt;
+}
+
+// ---------------------------------------------------------------------------
+// Refunds.
+//
+// A merchant returns a payment to the person who made it. The refund moves a
+// shielded coin in the same transaction, exactly as settlement does, so the
+// contract never holds funds across blocks, and it is recorded as a hash tag so
+// the same payment cannot be refunded twice.
+//
+// Authority is the invoice's owner secret, not the payment link: a payer holds
+// the link and must not be able to refund themselves. To name the payment the
+// merchant needs the payer's key and the payment index, which the payer hands
+// over privately (the app builds a "refund code" for it). Both are witnesses
+// here and neither is published.
+//
+// Known limit, stated in docs/THREAT-MODEL.md: a refunded receipt stays on the
+// receipt tree, and a revenue attestation does not subtract refunds. Proving
+// that a hidden receipt is NOT in the refunded set needs a non-membership proof
+// the ledger types here do not provide.
+// ---------------------------------------------------------------------------
+
+// Hash tags of refunded receipts. A tag is a domain-separated hash of a receipt
+// that is already public, so it says only that one public receipt was refunded.
+export ledger refunded: Set<Bytes<32>>;
+
+circuit domain_refund(): Bytes<32> { return pad(32, "mask:refund:v1"); }
+
+circuit refund_tag(receipt: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([domain_refund(), receipt]);
+}
+
+export circuit refund_payment(
+  kind: InvoiceKind,
+  token: TokenKind,
+  coin: ShieldedCoinInfo,
+  payer_addr: ZswapCoinPublicKey
+): Bytes<32> {
+  const commitment = disclose(own_commitment(kind, token));
+
+  assert(invoices.member(commitment), "unknown invoice");
+  const state = invoices.lookup(commitment);
+  assert(owner_tag(owner_secret()) == state.owner, "not the invoice owner");
+
+  // Name the payment being returned. The index is pinned for STANDARD invoices
+  // for the same reason it is at settlement.
+  const index = disclose(
+    kind == InvoiceKind.STANDARD ? 0 as Uint<32> : payment_index()
+  );
+  const receipt = disclose(receipt_digest(commitment, payer_key(), index));
+  assert(receipts.member(receipt), "no such payment");
+
+  const tag = disclose(refund_tag(receipt));
+  assert(!refunded.member(tag), "payment already refunded");
+  refunded.insert(tag);
+
+  // Return exactly what was paid, in the asset it was paid in.
+  assert(coin.value == invoice_amount() as Uint<128>, "coin value does not match invoice");
+  assert(coin.color == expected_color(disclose(token)), "coin is not the invoice's asset");
+
+  receiveShielded(disclose(coin));
+  sendImmediateShielded(
+    disclose(coin),
+    left<ZswapCoinPublicKey, ContractAddress>(disclose(payer_addr)),
+    disclose(coin.value)
+  );
+
+  return tag;
+}
+
+// ---------------------------------------------------------------------------
+// Selective disclosure — prove a fact about revenue without revealing it.
+//
+// This is what turns a private payment product into an auditable one. A merchant can hand an
+// accountant, a lender or a regulator a statement like "my revenue from these
+// payments is at least X" and have it verified against the chain — while the
+// actual revenue, the individual amounts, and which payments were counted all
+// stay private.
+//
+// The batch size is fixed at 4. Circuits cannot loop over variable-length
+// data, and each extra receipt adds a Merkle path verification, which is the
+// expensive part. Larger batches mean compiling a wider variant, not changing
+// the design.
+// ---------------------------------------------------------------------------
+
+// Evidence for a revenue attestation. All private.
+//
+// Note what is NOT here: the receipt digests themselves. An earlier version
+// took them as free witnesses alongside the amounts, and that was broken —
+// verifying a Merkle path proves only that *some* leaf is in the tree, so a
+// merchant could supply a valid path for a real receipt while claiming an
+// arbitrary amount beside it. Nothing tied the two together.
+//
+// Receipts are now DERIVED from the terms below. To attest to an amount you
+// must produce a receipt that hashes from that amount and is on the tree,
+// which means an actual payment of that amount must have happened.
+witness attested_amounts(): Vector<4, Uint<64>>;
+witness attested_salts(): Vector<4, Bytes<32>>;
+witness attested_payers(): Vector<4, Bytes<32>>;
+witness attested_indices(): Vector<4, Uint<32>>;
+witness attested_paths(): Vector<4, MerkleTreePath<10, Bytes<32>>>;
+
+circuit domain_attest(): Bytes<32> { return pad(32, "mask:attest:v1"); }
+
+// Recompute one payment's receipt from its private terms and prove it is on
+// the ledger. Returns the receipt so the caller can bind it into the digest.
+circuit verify_attested_payment(
+  kind: InvoiceKind,
+  token: TokenKind,
+  amount: Uint<64>,
+  salt: Bytes<32>,
+  payer: Bytes<32>,
+  index: Uint<32>,
+  path: MerkleTreePath<10, Bytes<32>>
+): Bytes<32> {
+  const commitment = invoice_commitment(merchant_key(), amount, kind, token, salt);
+  const receipt = receipt_digest(commitment, payer, index);
+
+  // Bind the path to THIS receipt. Without this the path could belong to any
+  // other payment and the amount beside it would be unconstrained.
+  assert(path.leaf == receipt, "merkle path does not match the claimed payment");
+
+  // And prove the path really is a path in this contract's receipt tree.
+  assert(
+    receipt_tree.checkRoot(disclose(merkleTreePathRoot<10, Bytes<32>>(path))),
+    "payment is not on the ledger"
+  );
+
+  return receipt;
+}
+
+// Prove total revenue over 4 payments is at least `threshold`.
+//
+// A verifier learns the threshold, the invoice kind and token, and that the
+// claim holds. They do not learn the actual total, any individual amount, any
+// payer, or which payments were counted.
+export circuit attest_revenue_at_least(
+  kind: InvoiceKind,
+  token: TokenKind,
+  threshold: Uint<64>
+): Bytes<32> {
+  const amounts = attested_amounts();
+  const salts = attested_salts();
+  const payers = attested_payers();
+  const indices = attested_indices();
+  const paths = attested_paths();
+
+  const r0 = verify_attested_payment(kind, token, amounts[0], salts[0], payers[0], indices[0], paths[0]);
+  const r1 = verify_attested_payment(kind, token, amounts[1], salts[1], payers[1], indices[1], paths[1]);
+  const r2 = verify_attested_payment(kind, token, amounts[2], salts[2], payers[2], indices[2], paths[2]);
+  const r3 = verify_attested_payment(kind, token, amounts[3], salts[3], payers[3], indices[3], paths[3]);
+
+  // Distinct payments only — otherwise one payment could be counted four times.
+  assert(r0 != r1 && r0 != r2 && r0 != r3 && r1 != r2 && r1 != r3 && r2 != r3,
+         "attested payments must be distinct");
+
+  // The sum is computed on private values and never disclosed. Only the
+  // comparison's outcome escapes, and only because the assert must hold.
+  const total = (amounts[0] as Uint<66>)
+              + (amounts[1] as Uint<66>)
+              + (amounts[2] as Uint<66>)
+              + (amounts[3] as Uint<66>);
+  assert(total >= threshold as Uint<66>, "revenue below threshold");
+
+  // Bind the attestation to the merchant and the claim so it cannot be reused
+  // for a different threshold or by a different merchant.
+  const digest = disclose(persistentHash<Vector<4, Bytes<32>>>([
+    domain_attest(),
+    persistentHash<Vector<2, Bytes<32>>>([domain_merchant(), merchant_key()]),
+    persistentHash<Uint<64>>(threshold),
+    persistentHash<Vector<4, Bytes<32>>>([r0, r1, r2, r3])
+  ]));
+
+  assert(!attestations.member(digest), "attestation already published");
+  attestations.insert(digest);
+  return digest;
+}
+
+// Anyone can check a published attestation.
+export circuit attestation_exists(digest: Bytes<32>): Boolean {
+  return attestations.member(disclose(digest));
+}
+
+// ---------------------------------------------------------------------------
+// Batch settlement.
+//
+// Settle four invoices under a single proof: one proof covering four
+// settlements replaces four proofs of roughly 30 seconds each.
+// Whether that is actually faster depends on how proving cost scales with
+// circuit size, which is measured rather than assumed — see
+// docs/MIDNIGHT_CONTRACT_STATUS.md for the number.
+//
+// Fixed at four for the same reason the attestation batch is: a circuit cannot
+// loop over a variable number of items. A wider batch is a wider compiled
+// variant, not a different design.
+// ---------------------------------------------------------------------------
+
+witness batch_amounts(): Vector<4, Uint<64>>;
+witness batch_salts(): Vector<4, Bytes<32>>;
+witness batch_merchants(): Vector<4, Bytes<32>>;
+witness batch_indices(): Vector<4, Uint<32>>;
+
+// Settle one invoice inside a batch. Returns its receipt.
+//
+// Split out so the batch circuit reads as four identical steps rather than
+// four copies of the same twenty lines.
+circuit settle_one(
+  kind: InvoiceKind,
+  token: TokenKind,
+  merchant: Bytes<32>,
+  amount: Uint<64>,
+  salt: Bytes<32>,
+  index: Uint<32>,
+  payer: Bytes<32>
+): Bytes<32> {
+  const commitment = disclose(invoice_commitment(merchant, amount, kind, token, salt));
+
+  assert(invoices.member(commitment), "unknown invoice in batch");
+  const state = invoices.lookup(commitment);
+  assert(state.status == InvoiceStatus.OPEN, "an invoice in the batch is not open");
+
+  if (state.expires_at != 0) {
+    assert(blockTimeLt(state.expires_at), "an invoice in the batch has expired");
+  }
+
+  const nullifier = disclose(settle_nullifier(commitment, payer, index));
+  assert(!spent.member(nullifier), "an invoice in the batch was already settled");
+  spent.insert(nullifier);
+
+  const receipt = disclose(receipt_digest(commitment, payer, index));
+  receipts.insert(receipt);
+  receipt_tree.insert(receipt);
+
+  invoices.insert(commitment, disclose(InvoiceState {
+    status: kind == InvoiceKind.STANDARD ? InvoiceStatus.SETTLED : InvoiceStatus.OPEN,
+    kind: state.kind,
+    token: state.token,
+    expires_at: state.expires_at,
+    contributions: (state.contributions + 1) as Uint<32>,
+    owner: state.owner
+  }));
+
+  return receipt;
+}
+
+// Settle four invoices at once.
+//
+// All four must succeed or the transaction does nothing — there is no partial
+// batch. That is the useful property: a payroll run either goes out or does
+// not, rather than leaving three of four people paid.
+export circuit settle_batch(kind: InvoiceKind, token: TokenKind): Vector<4, Bytes<32>> {
+  const amounts = batch_amounts();
+  const salts = batch_salts();
+  const merchants = batch_merchants();
+  const indices = batch_indices();
+  const payer = payer_key();
+
+  const r0 = settle_one(kind, token, merchants[0], amounts[0], salts[0], indices[0], payer);
+  const r1 = settle_one(kind, token, merchants[1], amounts[1], salts[1], indices[1], payer);
+  const r2 = settle_one(kind, token, merchants[2], amounts[2], salts[2], indices[2], payer);
+  const r3 = settle_one(kind, token, merchants[3], amounts[3], salts[3], indices[3], payer);
+
+  // Four distinct invoices, not the same one four times.
+  assert(r0 != r1 && r0 != r2 && r0 != r3 && r1 != r2 && r1 != r3 && r2 != r3,
+         "batch entries must be distinct");
+
+  return [r0, r1, r2, r3];
+}

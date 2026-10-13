@@ -1,0 +1,112 @@
+// Mask gift cards — private bearer notes.
+//
+// A gift card is a shielded coin sent to a one-time key derived from the card's
+// own secret. Whoever holds the secret can rebuild the key and spend the coin.
+// That is what "bearer" means, and it is how shielded notes work everywhere.
+//
+// The contract does NOT hold the money.
+//
+// An earlier version did, and it was measurably worse. A custodied coin lives
+// in public ledger state, so its value is public, and every redemption showed
+// up as a delta:
+//
+//     500 -> 750 -> 875 -> redeem 137 -> 738
+//
+// Anyone watching learned the amount of every redemption. No contract can avoid
+// that while holding funds — the leak is the custody, not the code. So custody
+// was dropped.
+//
+// What is left here is a registry: a commitment proving a card was genuinely
+// issued by this merchant, with no amount, no custody and no delta to watch.
+// Double-spending is prevented by zswap itself, because the coin can only be
+// spent once, which is a stronger guarantee than a nullifier set the contract
+// has to maintain.
+//
+// The trade this makes, stated plainly: no on-chain PIN check and no freezing a
+// lost card, because the contract never holds anything to withhold. A card is
+// cash. Losing it is losing cash. Where PIN protection and revocation matter
+// more than privacy, use mask_card — that is what it is for.
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+circuit domain_card():     Bytes<32> { return pad(32, "mask:giftcard:v2"); }
+circuit domain_merchant(): Bytes<32> { return pad(32, "mask:gift:merchant:v2"); }
+
+// Issued card commitments. Membership proves a card came from a real merchant
+// on this contract. It says nothing about value, and nothing about whether the
+// card has been spent — that lives in zswap, not here.
+export ledger cards: Set<Bytes<32>>;
+
+// Cards a merchant has voluntarily marked as void. Advisory only: a voided card
+// whose coin is unspent can still be spent, because the contract has no power
+// over a coin it does not hold. Present so a merchant can publish "this batch
+// was printed in error", not as a security control.
+export ledger voided: Set<Bytes<32>>;
+
+export ledger issued: Counter;
+
+// ---------------------------------------------------------------------------
+// Witnesses
+// ---------------------------------------------------------------------------
+
+// The card secret. This is the card. It derives the spending key for the coin,
+// so it is handed to the recipient and to nobody else.
+witness card_secret(): Bytes<32>;
+
+// The issuing merchant's identity key, so a card can be attributed.
+witness merchant_key(): Bytes<32>;
+
+// ---------------------------------------------------------------------------
+
+// A card commitment.
+//
+// Binds the card secret to the issuing merchant. Deliberately does NOT bind the
+// amount: the amount is the coin's value, which only the holder can see, and
+// committing to it here would put a hash of it on chain for a dictionary
+// attack over plausible denominations.
+circuit card_commitment(secret: Bytes<32>, merchant: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([
+    domain_card(),
+    persistentHash<Vector<2, Bytes<32>>>([domain_merchant(), merchant]),
+    secret
+  ]);
+}
+
+// Register a card.
+//
+// Called once by the merchant at issue time. The coin itself is sent to the
+// card's derived key by the merchant's wallet, outside this contract — so no
+// value passes through here and none of it is observable.
+export circuit issue(): Bytes<32> {
+  const commitment = disclose(card_commitment(card_secret(), merchant_key()));
+  assert(!cards.member(commitment), "card already issued");
+
+  cards.insert(commitment);
+  issued.increment(1);
+  return commitment;
+}
+
+// Mark a card void. Merchant only — reproducing the commitment requires their
+// identity key alongside the card secret.
+export circuit void_card(): [] {
+  const commitment = disclose(card_commitment(card_secret(), merchant_key()));
+  assert(cards.member(commitment), "unknown card");
+  assert(!voided.member(commitment), "card already void");
+  voided.insert(commitment);
+}
+
+// ---------------------------------------------------------------------------
+// Public checks
+// ---------------------------------------------------------------------------
+
+// Was this card issued by a merchant on this contract? A recipient can check
+// before accepting one.
+export circuit card_issued(commitment: Bytes<32>): Boolean {
+  return cards.member(disclose(commitment));
+}
+
+export circuit card_voided(commitment: Bytes<32>): Boolean {
+  return voided.member(disclose(commitment));
+}

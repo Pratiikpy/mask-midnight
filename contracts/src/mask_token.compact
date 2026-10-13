@@ -1,0 +1,88 @@
+// Mask reference tokens — mUSDC and mUSAD.
+//
+// Midnight has no stablecoin. NIGHT is the native token and DUST pays fees and
+// is not transferable, so Mask's multi-token product needs assets to denominate
+// invoices in. These are shielded ledger tokens (zswap UTXOs) minted by this
+// contract: sender, recipient, value and token type are all hidden from
+// observers, which is exactly the property the payment product depends on.
+//
+// They are reference assets for testnet and are labelled as such everywhere in
+// the UI.
+//
+// Shielded LEDGER tokens are used deliberately, not shielded CONTRACT tokens.
+// The latter cannot enforce anything after issuance — no freeze, no clawback,
+// and unreliable supply tracking because holders can burn directly. Midnight's
+// own guidance is to avoid them, and OpenZeppelin has archived their
+// ShieldedERC20 for that reason.
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+// Domain separators double as token colours. A colour is derived from
+// (domainSep, contractAddress), so these two strings are what make mUSDC and
+// mUSAD distinct assets rather than the same one under two names.
+circuit domain_musdc(): Bytes<32> { return pad(32, "mask:token:musdc:v1"); }
+circuit domain_musad(): Bytes<32> { return pad(32, "mask:token:musad:v1"); }
+
+export enum MaskToken {
+  MUSDC,
+  MUSAD
+}
+
+// Nonce source for minted coins. Every shielded coin needs a unique nonce —
+// reusing one links coins together and destroys the privacy the token exists
+// to provide. evolveNonce over a monotonic counter guarantees uniqueness
+// without storing a nonce per coin.
+export ledger mint_counter: Counter;
+export ledger mint_seed: Bytes<32>;
+
+// Deliberately NOT tracked: a per-asset mint counter. Branching on the token to
+// bump one of two public counters tells an observer which asset was minted, and
+// shielded coins otherwise hide the token type. The compiler refuses it outright
+// ("might disclose the boolean value of a comparison involving the witness
+// value"), which is the right answer — so only the aggregate count exists.
+
+constructor(seed: Bytes<32>) {
+  mint_seed = disclose(seed);
+}
+
+circuit domain_for(token: MaskToken): Bytes<32> {
+  return token == MaskToken.MUSDC ? domain_musdc() : domain_musad();
+}
+
+// Mint reference tokens to the caller.
+//
+// Open on testnet by design: a reviewer has to be able to obtain the asset in
+// order to try the product at all. On a real deployment this would be gated.
+export circuit mint(token: MaskToken, amount: Uint<64>): ShieldedCoinInfo {
+  mint_counter.increment(1);
+  const nonce = evolveNonce(mint_counter.read() as Uint<128>, mint_seed);
+
+  return mintShieldedToken(
+    disclose(domain_for(token)),
+    disclose(amount),
+    nonce,
+    left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
+  );
+}
+
+// Move a coin to another holder. Named `transfer` because `send` collides with
+// a CompactStandardLibrary binding.
+export circuit transfer(
+  coin: ShieldedCoinInfo,
+  to: ZswapCoinPublicKey,
+  amount: Uint<128>
+): ShieldedSendResult {
+  receiveShielded(disclose(coin));
+  return sendImmediateShielded(
+    disclose(coin),
+    left<ZswapCoinPublicKey, ContractAddress>(disclose(to)),
+    disclose(amount)
+  );
+}
+
+// The colour of a Mask token, so other contracts and clients can identify it.
+export circuit token_color(token: MaskToken): Bytes<32> {
+  return tokenType(disclose(domain_for(token)), kernel.self());
+}

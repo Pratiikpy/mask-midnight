@@ -1,0 +1,98 @@
+// ---------------------------------------------------------------------------
+// VENDORED — not Mask's code.
+//
+// Source:  midnightntwrk/example-zkloan, contract/src/schnorr.compact
+// License: Apache License 2.0, Copyright (C) Midnight Foundation
+//
+// Copied verbatim rather than reimplemented. Schnorr verification over Jubjub
+// has a subtle challenge-reduction step — the witness supplies a quotient and
+// remainder for division by 2^248, and the quotient must be range-bounded or a
+// prover can solve for any challenge and forge a signature. That reasoning is
+// already worked out and reviewed here; rewriting it would add risk and no
+// value.
+//
+// Upstream note: to be replaced by jubjubSchnorrVerify from
+// CompactStandardLibrary once a compiler release provides it.
+// ---------------------------------------------------------------------------
+
+// Schnorr Signature Verification Polyfill for Jubjub Curve
+// Temporary: will be replaced by jubjubSchnorrVerify from CompactStandardLibrary
+// when it becomes available in a future Compact compiler release.
+// See: https://github.com/LFDT-Minokawa/compact/blob/25b22e3/compiler/standard-library.compact
+
+module schnorr {
+  import CompactStandardLibrary;
+
+  export struct SchnorrSignature {
+    announcement: JubjubPoint;
+    response: Field;
+  }
+
+  struct SchnorrHashInput<#n> {
+    ann_x: Field;
+    ann_y: Field;
+    pk_x: Field;
+    pk_y: Field;
+    msg: Vector<n, Field>;
+  }
+
+  // The witness provides the quotient and remainder of dividing the challenge hash
+  // by 2^248, so we can truncate it to fit in Jubjub's scalar field.
+  // The quotient is Uint<7> (not Field) so the reduction below is checked over the
+  // integers rather than modulo the field prime — see the range assert in schnorrVerify.
+  witness getSchnorrReduction(challengeHash: Field): [Uint<7>, Uint<248>];
+
+  export circuit schnorrVerify<#n>(
+                   msg: Vector<n, Field>,
+                   signature: SchnorrSignature,
+                   pk: JubjubPoint
+                   ): [] {
+    const {announcement, response} = signature;
+    const cFull: Field =
+            transientHash<SchnorrHashInput<n>>(
+              SchnorrHashInput<n> { ann_x: jubjubPointX(announcement),
+                                    ann_y: jubjubPointY(announcement),
+                                    pk_x: jubjubPointX(pk),
+                                    pk_y: jubjubPointY(pk),
+                                    msg: msg }
+              );
+    // Truncate challenge to 248 bits via witness-assisted division by 2^248.
+    // The witness provides (quotient, remainder) such that cFull == q * 2^248 + r
+    // where r : Uint<248>, guaranteeing r < 2^248 < Jubjub subgroup order.
+    // This is needed because ecMul requires scalars < JUBJUB_ORDER (~2^252.4),
+    // but transientHash returns values in BLS12-381's scalar field (~2^255).
+    const TWO_248: Field =
+            452312848583266388373324160190187140051835877600158453279131187530910662656 as Field;
+    const [q, cTruncated] = getSchnorrReduction(cFull);
+    // Bound the quotient so the reduction equation holds over the integers, not
+    // modulo the field prime. Without this, q : Field is unconstrained and a prover
+    // could pick any cTruncated (i.e. any challenge) and solve for a matching q,
+    // forging the signature. floor((BLS12-381 scalar prime - 1) / 2^248) == 115,
+    // so an honest quotient is always in [0, 115].
+    assert(disclose(q) < 116, "Schnorr quotient out of range");
+    assert(disclose(q) * TWO_248 + (disclose(cTruncated) as Field) == cFull,
+           "Invalid challenge reduction"
+           );
+    const c: Field = disclose(cTruncated) as Field;
+    const lhs: JubjubPoint = ecMulGenerator(response);
+    const rhs: JubjubPoint = ecAdd(announcement, ecMul(pk, c));
+    assert(jubjubPointX(lhs) == jubjubPointX(rhs) && jubjubPointY(lhs) == jubjubPointY(rhs),
+           "Invalid attestation signature");
+  }
+
+  export pure circuit schnorrChallenge(
+                        ann_x: Field,
+                        ann_y: Field,
+                        pk_x: Field,
+                        pk_y: Field,
+                        msg: Vector<4, Field>
+                        ): Field {
+    const cFull: Field =
+            transientHash<SchnorrHashInput<4>>(
+              SchnorrHashInput<4> { ann_x: ann_x, ann_y: ann_y, pk_x: pk_x, pk_y: pk_y, msg: msg }
+              );
+    // Return the full hash. Callers must truncate to 248 bits (mod 2^248)
+    // to match schnorrVerify's challenge reduction.
+    return cFull;
+  }
+}

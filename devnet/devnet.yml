@@ -1,0 +1,103 @@
+# Mask — local Midnight development network
+#
+# Versions are pinned to the set published by midnightntwrk/midnight-local-dev,
+# which is the official local development environment and a known-working
+# combination. Do not bump these individually — the node, indexer and proof
+# server are released as a matched set.
+#
+#   node          1.0.0
+#   indexer       4.3.3
+#   proof-server  8.1.0
+#
+# Container names are prefixed `mask-` so this stack never collides with any
+# other Midnight stack on the same machine.
+#
+# Every service restarts on failure. The node in particular shuts itself down
+# cleanly (exit 0) when its `txpool-background` task fails — observed after
+# ~1700 blocks of uptime:
+#
+#     Essential task `txpool-background` failed. Shutting down service.
+#
+# Without a restart policy the whole devnet silently disappears mid-session and
+# the next thing to touch it fails with a confusing WebSocket error.
+#
+# Ports bind to all interfaces rather than 127.0.0.1. On Windows the browser
+# runs outside WSL, and a 127.0.0.1 binding inside WSL is unreachable from it.
+# This is a local devnet holding no value; do not copy this binding to anything
+# that does.
+#
+#   node          http://127.0.0.1:9944
+#   indexer       http://127.0.0.1:8088/api/v4/graphql
+#   indexer ws    ws://127.0.0.1:8088/api/v4/graphql/ws
+#   proof server  http://127.0.0.1:6300
+#   network id    undeployed
+
+name: mask-devnet
+
+services:
+  proof-server:
+    container_name: 'mask-proof-server'
+    image: 'midnightntwrk/proof-server:8.1.0'
+    restart: unless-stopped
+    command: ['midnight-proof-server', '-v']
+    ports:
+      - '6300:6300'
+    environment:
+      RUST_BACKTRACE: 'full'
+    healthcheck:
+      test: ['CMD-SHELL', 'echo > /dev/tcp/127.0.0.1/6300']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  indexer:
+    container_name: 'mask-indexer'
+    image: 'midnightntwrk/indexer-standalone:4.3.3'
+    restart: unless-stopped
+    ports:
+      - '8088:8088'
+    environment:
+      RUST_LOG: 'indexer=info,chain_indexer=info,indexer_api=info,wallet_indexer=info,indexer_common=info,fastrace_opentelemetry=off,info'
+      APP__APPLICATION__NETWORK_ID: 'undeployed'
+      APP__INFRA__NODE__URL: 'ws://node:9944'
+      APP__INFRA__STORAGE__PASSWORD: 'indexer'
+      APP__INFRA__PUB_SUB__PASSWORD: 'indexer'
+      APP__INFRA__LEDGER_STATE_STORAGE__PASSWORD: 'indexer'
+      APP__INFRA__SECRET: '303132333435363738393031323334353637383930313233343536373839303132'
+      APP__INFRA__SPO_NODE__URL: 'ws://node:9944'
+      APP__INFRA__SPO_NODE__BLOCKFROST_ID: 'e2e-test-dummy-id'
+    healthcheck:
+      test: ['CMD-SHELL', 'cat /var/run/indexer-standalone/running']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      node:
+        condition: service_healthy
+
+  node:
+    container_name: 'mask-node'
+    image: 'midnightntwrk/midnight-node:1.0.0'
+    restart: unless-stopped
+    ports:
+      - '9944:9944'
+    environment:
+      CFG_PRESET: 'dev'
+      SIDECHAIN_BLOCK_BENEFICIARY: '04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e'
+    # The node reports /health as soon as it is up, while still at genesis. The
+    # indexer's spo-indexer then dies with "Cannot construct OnlineClientAtBlock:
+    # block number 1 not found". So health here means "has produced a block past
+    # genesis" — the header number must not be "0x0".
+    healthcheck:
+      test:
+        - 'CMD-SHELL'
+        - >-
+          curl -sf -H "Content-Type: application/json"
+          -d '{"jsonrpc":"2.0","id":1,"method":"chain_getHeader","params":[]}'
+          http://localhost:9944 | grep -q '"number":"0x[1-9a-f]'
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

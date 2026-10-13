@@ -1,0 +1,15 @@
+{
+  "name": "@mask/mcp",
+  "version": "2.0.0",
+  "description": "Mask on Midnight — MCP server letting AI clients create private invoices and verify payments.",
+  "type": "module",
+  "bin": { "mask-mcp": "./dist/server.js" },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=22.0.0" },
+  "scripts": { "build": "tsc" },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "4.1.1"
+  },
+  "devDependencies": { "typescript": "~5.9.3", "@types/node": "^22.10.2" }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@mask/midnight-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Compact sources for Mask on Midnight, and the compiler output the devkit and app import.",
+  "scripts": {
+    "build": "npm run build:pay && npm run build:token && npm run build:card && npm run build:gift && npm run sync:app",
+    "build:pay": "compact compile +0.31.1 src/mask_pay.compact build/mask_pay",
+    "build:token": "compact compile +0.31.1 src/mask_token.compact build/mask_token",
+    "build:card": "compact compile +0.31.1 src/mask_card.compact build/mask_card",
+    "build:gift": "compact compile +0.31.1 src/mask_gift.compact build/mask_gift",
+    "build:smoke": "compact compile +0.31.1 src/mask_smoke.compact build/mask_smoke",
+    "test": "vitest run",
+    "sync:app": "node scripts/sync-app-assets.mjs"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4",
+    "typescript": "^5.9.3"
+  }
+}

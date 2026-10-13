@@ -1,0 +1,190 @@
+// Mask Card, burner wallets and gift cards.
+//
+// Card data, burner key material and gift-card secrets are kept in client-side
+// private state, where nothing limits their shape, so none of it appears here.
+//
+// What does belong on chain is the part that must be enforced: a credential
+// commitment that proves a card exists, and a nullifier set that stops the same
+// authorisation being used twice. Everything else — the card number, the label,
+// the key material — stays off the ledger entirely.
+//
+// The card is a *credential*, not a custodial balance. A cardholder proves
+// knowledge of (secret, PIN) to authorise a payment without connecting a
+// wallet — a wallet-free checkout. Spend
+// limits are enforced per authorisation rather than by holding funds, so the
+// contract never custodies money.
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+circuit domain_card():      Bytes<32> { return pad(32, "mask:card:v1"); }
+circuit domain_card_auth(): Bytes<32> { return pad(32, "mask:card:auth:v1"); }
+circuit domain_burner():    Bytes<32> { return pad(32, "mask:burner:v1"); }
+circuit domain_gift():      Bytes<32> { return pad(32, "mask:gift:v1"); }
+circuit domain_gift_spend(): Bytes<32> { return pad(32, "mask:gift:spend:v1"); }
+
+export enum CredentialKind {
+  CARD,
+  BURNER,
+  GIFT
+}
+
+// What the ledger keeps per credential. No balance, no label, no key material.
+export struct CredentialState {
+  kind: CredentialKind,
+  active: Boolean,
+  // Maximum value a single authorisation may carry. Public because a verifier
+  // must be able to check the limit was respected; it says nothing about what
+  // the card has actually spent.
+  spend_limit: Uint<64>,
+  // How many authorisations this credential has issued. A count, never amounts.
+  uses: Uint<32>
+}
+
+// commitment => state.
+export ledger credentials: Map<Bytes<32>, CredentialState>;
+
+// Spent authorisations. A card authorisation, like a payment, is one-time.
+export ledger card_spent: Set<Bytes<32>>;
+
+export ledger credentials_created: Counter;
+
+// ---------------------------------------------------------------------------
+// Witnesses — all client-side, none transmitted.
+// ---------------------------------------------------------------------------
+
+// The card secret. Printed on the card in the physical metaphor; known only to
+// the holder.
+witness card_secret(): Bytes<32>;
+
+// The PIN. Kept separate from the secret so that learning one is not enough:
+// a stolen card without the PIN, or a shoulder-surfed PIN without the card,
+// authorises nothing.
+witness card_pin(): Bytes<32>;
+
+// Randomness, so two cards with the same secret and PIN still differ.
+witness card_salt(): Bytes<32>;
+
+// The value this authorisation is for.
+witness auth_amount(): Uint<64>;
+
+// Distinguishes one authorisation from the next for the same card.
+witness auth_index(): Uint<32>;
+
+// ---------------------------------------------------------------------------
+
+// A credential commitment. Both factors are required to reproduce it, which is
+// what makes the card two-factor rather than a bearer token.
+circuit credential_commitment(
+  kind: CredentialKind,
+  secret: Bytes<32>,
+  pin: Bytes<32>,
+  salt: Bytes<32>
+): Bytes<32> {
+  return persistentHash<Vector<4, Bytes<32>>>([
+    domain_card(),
+    persistentHash<Uint<8>>(kind as Uint<8>),
+    persistentHash<Vector<2, Bytes<32>>>([secret, pin]),
+    salt
+  ]);
+}
+
+// One-time authorisation token.
+circuit auth_nullifier(
+  commitment: Bytes<32>,
+  amount: Uint<64>,
+  index: Uint<32>
+): Bytes<32> {
+  return persistentHash<Vector<4, Bytes<32>>>([
+    domain_card_auth(),
+    commitment,
+    persistentHash<Uint<64>>(amount),
+    persistentHash<Uint<32>>(index)
+  ]);
+}
+
+circuit own_credential(kind: CredentialKind): Bytes<32> {
+  return credential_commitment(kind, card_secret(), card_pin(), card_salt());
+}
+
+// Register a credential. The holder chooses the secret, PIN and salt locally;
+// only the commitment is published.
+export circuit create_credential(
+  kind: CredentialKind,
+  spend_limit: Uint<64>
+): Bytes<32> {
+  const commitment = disclose(own_credential(kind));
+  assert(!credentials.member(commitment), "credential already exists");
+
+  credentials.insert(commitment, disclose(CredentialState {
+    kind: kind,
+    active: true,
+    spend_limit: spend_limit,
+    uses: 0
+  }));
+  credentials_created.increment(1);
+  return commitment;
+}
+
+// Authorise a payment with the card, no wallet involved.
+//
+// Reproducing the commitment proves the caller holds both factors. The
+// nullifier makes the authorisation single-use, and the spend limit is checked
+// against the private amount without publishing it.
+export circuit authorise(kind: CredentialKind): Bytes<32> {
+  const commitment = disclose(own_credential(kind));
+
+  assert(credentials.member(commitment), "unknown credential");
+  const state = credentials.lookup(commitment);
+  assert(state.active, "credential is not active");
+
+  const amount = auth_amount();
+  // The comparison runs on a private amount against a public limit; only the
+  // outcome escapes.
+  assert(amount <= state.spend_limit, "amount exceeds card spend limit");
+
+  const nullifier = disclose(auth_nullifier(commitment, amount, auth_index()));
+  assert(!card_spent.member(nullifier), "authorisation already used");
+  card_spent.insert(nullifier);
+
+  credentials.insert(commitment, disclose(CredentialState {
+    kind: state.kind,
+    active: state.active,
+    spend_limit: state.spend_limit,
+    uses: (state.uses + 1) as Uint<32>
+  }));
+
+  return nullifier;
+}
+
+// Freeze a credential — a lost card, or a burner being retired. Only someone
+// holding both factors can do it, which is the same proof as spending.
+export circuit deactivate(kind: CredentialKind): [] {
+  const commitment = disclose(own_credential(kind));
+  assert(credentials.member(commitment), "unknown credential");
+
+  const state = credentials.lookup(commitment);
+  assert(state.active, "credential is already inactive");
+
+  credentials.insert(commitment, disclose(CredentialState {
+    kind: state.kind,
+    active: false,
+    spend_limit: state.spend_limit,
+    uses: state.uses
+  }));
+}
+
+// Public checks. A merchant can confirm a card is live before accepting it,
+// and anyone can confirm an authorisation was genuinely issued.
+export circuit credential_active(commitment: Bytes<32>): Boolean {
+  const key = disclose(commitment);
+  if (!credentials.member(key)) {
+    return false;
+  }
+  return credentials.lookup(key).active;
+}
+
+export circuit authorisation_used(nullifier: Bytes<32>): Boolean {
+  return card_spent.member(disclose(nullifier));
+}

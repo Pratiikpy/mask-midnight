@@ -1,0 +1,14 @@
+{
+  "name": "@mask/bot",
+  "version": "2.0.0",
+  "description": "Mask on Midnight — a Telegram bot that reads public state and never holds a secret.",
+  "type": "module",
+  "main": "src/index.ts",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "test": "vitest run"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": { "typescript": "~5.9.3", "vitest": "^3.2.4", "@types/node": "^22.10.2" }
+}

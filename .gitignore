@@ -1,0 +1,17 @@
+node_modules/
+**/node_modules
+app/dist/
+contracts/build/
+app/public/keys/
+app/public/zkir/
+app/public/compiler/
+devkit/midnight-level-db/
+devkit/logs/
+*.log
+.secrets/
+*.seed
+deployments/*.state.json
+deployments/undeployed.*
+__pycache__/
+*.pyc
+.pytest_cache/

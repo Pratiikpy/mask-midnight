@@ -1,0 +1,173 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/manrope';
+@import '@fontsource-variable/jetbrains-mono';
+@import '@fontsource/instrument-serif/400.css';
+@import '@fontsource/instrument-serif/400-italic.css';
+
+/*
+  Mask on Midnight: a night-sky identity. A deep navy ground, an ice-cyan
+  "aurora" for anything that means private or verified, and a violet "nova" for
+  the primary action. Headlines are set in a serif with italic emphasis; the
+  interface itself is a clean geometric sans with a mono for hashes.
+*/
+@theme {
+  --color-ground: #050714;
+  --color-surface: #0a0e24;
+  --color-surface-2: #10163a;
+  --color-line: #1b2250;
+  --color-line-bright: #2b3577;
+
+  --color-ink: #ecefff;
+  --color-ink-dim: #a3abd3;
+  --color-ink-faint: #7a82ad;
+
+  --color-aurora: #6ee7f9;
+  --color-aurora-dim: #1c6f85;
+  --color-nova: #9a89ff;
+  --color-danger: #ff6b81;
+
+  --font-sans: 'Manrope Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: 'Instrument Serif', 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+}
+
+html {
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+  min-height: 100dvh;
+}
+
+/* The sky: a scatter of fixed stars and a wash of violet and cyan at the horizon. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(1.2px 1.2px at 12% 18%, rgba(236, 239, 255, 0.55), transparent 60%),
+    radial-gradient(1px 1px at 27% 62%, rgba(236, 239, 255, 0.4), transparent 60%),
+    radial-gradient(1.4px 1.4px at 41% 9%, rgba(236, 239, 255, 0.5), transparent 60%),
+    radial-gradient(1px 1px at 58% 41%, rgba(236, 239, 255, 0.35), transparent 60%),
+    radial-gradient(1.3px 1.3px at 73% 22%, rgba(236, 239, 255, 0.5), transparent 60%),
+    radial-gradient(1px 1px at 86% 70%, rgba(236, 239, 255, 0.4), transparent 60%),
+    radial-gradient(1.1px 1.1px at 94% 12%, rgba(236, 239, 255, 0.45), transparent 60%),
+    radial-gradient(1px 1px at 6% 84%, rgba(236, 239, 255, 0.35), transparent 60%),
+    radial-gradient(1.2px 1.2px at 64% 88%, rgba(236, 239, 255, 0.4), transparent 60%),
+    radial-gradient(ellipse 70% 45% at 50% -10%, rgba(154, 137, 255, 0.16), transparent 70%),
+    radial-gradient(ellipse 50% 35% at 100% 100%, rgba(110, 231, 249, 0.07), transparent 70%);
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+/* Respect a user's reduced-motion preference. The progress UI animates a lot. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes mask-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.mask-pulse {
+  animation: mask-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes mask-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(400%);
+  }
+}
+
+.mask-sweep::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 25%;
+  background: linear-gradient(90deg, transparent, rgba(110, 231, 249, 0.5), transparent);
+  animation: mask-sweep 1.8s ease-in-out infinite;
+}
+
+/* A slow drift for the moon and the horizon glow on the landing page. */
+@keyframes mask-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.mask-float {
+  animation: mask-float 9s ease-in-out infinite;
+}
+
+@keyframes mask-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.mask-rise {
+  animation: mask-rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(calc(-100% - 1rem));
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@mask/demo-shop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A shop that takes private payments. Proves the Mask integration end to end.",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": { "start": "node --experimental-strip-types src/shop.ts" },
+  "license": "Apache-2.0"
+}

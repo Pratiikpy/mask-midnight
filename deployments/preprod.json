@@ -1,0 +1,86 @@
+{
+  "network": "preprod",
+  "deployer": "mn_addr_preprod1v7dpyekrzkt8yqe7czkms07qt98vahqfwpyj4mqjn29w0y7r058qswn4xk",
+  "token": {
+    "keys": {
+      "mint": {
+        "tx": "006b9f962778e7aa8cf71650c428548b20bc5663276a5c0efdf4c66537b745f50f",
+        "block": 2943938
+      },
+      "transfer": {
+        "tx": "00d40450de7dbe860c2bfcb389d21b8c8b4c6efdd29fd2360e587161ba7bad1514",
+        "block": 2943941
+      },
+      "token_color": {
+        "tx": "007a21e9a607ed071a7107585371fc25ae86c359d9b42657795aeeaa7d0fbdb633",
+        "block": 2943946
+      }
+    },
+    "address": "91f9b035cf5d1bb70fcb15f259c782899553b168d635ac790f35e136b92dcdfd",
+    "deployTx": "00b57d62f0a994e0badf991309dd89e4db725f3d1a013edaab72c62771462be31f",
+    "deployBlock": 2943934
+  },
+  "pay": {
+    "keys": {
+      "create_invoice": {
+        "tx": "00d38c1e9b6d0ffd183ce54bc994fa36be4f40322624af770657f5aae7231a2716",
+        "block": 2943953
+      },
+      "settle_invoice": {
+        "tx": "008517a00fad1d151627d4af713c85dd46ea9381867a3f53828cceac63ac29099c",
+        "block": 2943957
+      },
+      "close_invoice": {
+        "tx": "006d057a5beb5693f38b7c21fe246afaeb3dce9c03e94e020f3ebde98832d5f2bd",
+        "block": 2943962
+      },
+      "cancel_invoice": {
+        "tx": "007952b4c2c54fc923fb80033a16855168c5e29d1f542ae9c1bc250e2f2feb5fc8",
+        "block": 2943966
+      },
+      "invoice_exists": {
+        "tx": "00208159d572db9df324540777341ae47f5733cec7068a3035b1cbb12feeceb5f1",
+        "block": 2943971
+      },
+      "is_settled": {
+        "tx": "007ef5c16dba64d367eaad7a2529fcb47a9d3d68502c450e1462b162b4bbbd1f32",
+        "block": 2943976
+      },
+      "receipt_exists": {
+        "tx": "009ac7ea7daa89004cbadef2da4a4021a6c9441550ac504cee1f5d1e6127141331",
+        "block": 2943980
+      },
+      "settle_invoice_shielded": {
+        "tx": "00ef34eebc2966a0634fd5f6b6ed95559bebdfae9691d0efe580e2de22ba6cc023",
+        "block": 2943983
+      },
+      "settle_invoice_converted": {
+        "tx": "0003e0747b363585d94de40a8119f9b02d94938ef6449e24f6b969c0792ef91ced",
+        "block": 2943988
+      },
+      "refund_payment": {
+        "tx": "00b69d890a28fe493d79d9f4c37e99aef916ffc43c17bb44241029b3a1012288d9",
+        "block": 2943991
+      },
+      "attestation_exists": {
+        "tx": "00b87ba2c7c6e0f902d4c83e15c16bc6727bdf70f2b651aae3f75b0d60f9c1ac65",
+        "block": 2963532
+      },
+      "settle_batch": {
+        "tx": "007820db4c2184fbdf25346b049e761cdc2458c7313d26852d7fc3ede24e84ac3e",
+        "block": 2963535
+      }
+    },
+    "address": "0e0e94bb654bb855d85e7428427ecf2d89ddde4d4d9f3737ccc9f1242d12ea29",
+    "deployTx": "00f5e7e944c3f22e97a543bafb7d01ca15e8f65918d8fcb218bd3529aab95a44c2",
+    "deployBlock": 2943949
+  },
+  "colors": {
+    "musdc": "910b65b74e579ce84e036150f18d1d6cf9965eb57537788db0cf912cbfc452bc",
+    "musad": "3eb92681dceb0e57a784ca83df9400a31fd78b73549405fee56d39691062a4f0"
+  },
+  "oraclePublicKey": {
+    "x": "42442123519521363356364013221180407119556542130216780671278515893862459491064",
+    "y": "8389499689869617599205198645443414217389487859639133365982435796557732967100"
+  }
+}

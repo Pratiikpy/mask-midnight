@@ -1,0 +1,95 @@
+// Mask — Phase 0 smoke contract.
+//
+// Not the product. This exists to prove the whole pipeline end to end on the
+// exact primitives Mask's real invoice contract will be built from:
+//
+//   * a private amount that never reaches the ledger,
+//   * a public commitment binding merchant + amount + salt,
+//   * a Map of open invoices keyed by that commitment,
+//   * a nullifier Set that makes paying the same invoice twice impossible.
+//
+// If this deploys, proves, submits and reads back, then Phase 1's design work
+// is standing on verified ground rather than documentation.
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+// Invoice status. Kept deliberately public — an observer may learn that *an*
+// invoice exists and whether it settled, never for how much or by whom.
+export enum InvoiceStatus {
+  OPEN,
+  SETTLED
+}
+
+// commitment => status. The commitment is a hash; the amount behind it is not
+// recoverable from the ledger.
+export ledger invoices: Map<Bytes<32>, InvoiceStatus>;
+
+// Spent payment authorisations. Replay protection: a nullifier can be inserted
+// exactly once, so an invoice cannot be paid twice.
+export ledger spent: Set<Bytes<32>>;
+
+// Count of invoices ever created. Public by design — it is the only aggregate
+// we are willing to leak.
+export ledger created: Counter;
+
+// Private inputs supplied by the caller's own machine. These are witness
+// values: the compiler tracks them and refuses to let them reach the ledger
+// without an explicit disclose().
+witness merchant_secret(): Bytes<32>;
+witness invoice_amount(): Uint<64>;
+witness invoice_salt(): Bytes<32>;
+
+// Bind merchant, amount and salt into one opaque 32-byte commitment.
+circuit commitment_of(
+  merchant: Bytes<32>,
+  amount: Uint<64>,
+  salt: Bytes<32>
+): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([
+    merchant,
+    persistentHash<Uint<64>>(amount),
+    salt
+  ]);
+}
+
+// Create an invoice. The amount is a private input and is never disclosed —
+// only the commitment reaches the ledger.
+export circuit create_invoice(): Bytes<32> {
+  const c = commitment_of(merchant_secret(), invoice_amount(), invoice_salt());
+  const key = disclose(c);
+  assert(!invoices.member(key), "invoice already exists");
+  invoices.insert(key, InvoiceStatus.OPEN);
+  created.increment(1);
+  return key;
+}
+
+// Settle an invoice. The payer must reproduce the same commitment from the
+// same private values, which proves they know the invoice's real terms without
+// revealing them. The nullifier makes a second settlement impossible.
+export circuit settle_invoice(): Bytes<32> {
+  const c = commitment_of(merchant_secret(), invoice_amount(), invoice_salt());
+  const key = disclose(c);
+
+  assert(invoices.member(key), "unknown invoice");
+  assert(invoices.lookup(key) == InvoiceStatus.OPEN, "invoice not open");
+
+  const nullifier = disclose(persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "mask:settle:v0"),
+    c
+  ]));
+  assert(!spent.member(nullifier), "invoice already settled");
+
+  spent.insert(nullifier);
+  invoices.insert(key, InvoiceStatus.SETTLED);
+  return nullifier;
+}
+
+// Read-only status probe.
+export circuit is_settled(key: Bytes<32>): Boolean {
+  if (!invoices.member(disclose(key))) {
+    return false;
+  }
+  return invoices.lookup(disclose(key)) == InvoiceStatus.SETTLED;
+}

@@ -1,0 +1,19 @@
+[project]
+name = "mask-midnight"
+version = "2.0.0"
+description = "Mask on Midnight — private invoices and payment links for Python backends."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+keywords = ["midnight", "privacy", "payments", "zero-knowledge", "invoices"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mask_midnight*"]
