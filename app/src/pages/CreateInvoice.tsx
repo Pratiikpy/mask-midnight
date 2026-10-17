@@ -14,6 +14,7 @@ import {
 import { ProofProgress } from '../components/ProofProgress.tsx';
 import { PaymentQR } from '../components/PaymentQR.tsx';
 import { useMask } from '../providers/MaskProvider.tsx';
+import { coinPublicKeyHex } from '../lib/wallet.ts';
 import { useCircuit } from '../lib/useCircuit.ts';
 import { CONTRACT_ADDRESS } from '../lib/config.ts';
 import { privateStateFromTerms } from '../lib/contract.ts';
@@ -135,7 +136,8 @@ export function CreateInvoicePage() {
       // Where an escrowed payment pays out. Present only when a wallet is
       // connected, because it is the wallet's shielded key; an invoice made
       // offline can still be settled by proof, just not by moving a coin.
-      merchantAddr: connection.status === 'connected' ? connection.coinPublicKey : undefined,
+      merchantAddr:
+        connection.status === 'connected' ? coinPublicKeyHex(connection.coinPublicKey) : undefined,
       items: showItems ? items.map((i) => ({ name: i.name.trim(), qty: i.qty.trim(), unit: i.unit.trim() })) : undefined,
     };
 

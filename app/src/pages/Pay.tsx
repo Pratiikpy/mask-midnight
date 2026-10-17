@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Card, ErrorNote, Field, Input, PrivacyNote, PageHeader } from '../components/ui.tsx';
 import { ProofProgress } from '../components/ProofProgress.tsx';
 import { useMask } from '../providers/MaskProvider.tsx';
+import { coinPublicKeyHex } from '../lib/wallet.ts';
 import { useCircuit } from '../lib/useCircuit.ts';
 import { CONTRACT_ADDRESS } from '../lib/config.ts';
 import { privateStateFromTerms } from '../lib/contract.ts';
@@ -114,7 +115,7 @@ export function PayPage() {
           terms.kind,
           terms.token,
           coin,
-          { bytes: fromHex(terms.merchantAddr!) },
+          { bytes: fromHex(coinPublicKeyHex(terms.merchantAddr!)) },
         ])) as { private: { result: Uint8Array } };
       } else {
         out = (await circuit.run('settle_invoice', privateState, [

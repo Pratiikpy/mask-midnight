@@ -7,7 +7,7 @@
 // one, and nothing tells them to check their node.
 
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
-import { CONTRACT_ADDRESS, LOCAL_FALLBACK } from './config.ts';
+import { CONTRACT_ADDRESS, NETWORK_ID, PUBLIC_INDEXER } from './config.ts';
 import * as MaskPay from '../../../contracts/build/mask_pay/contract/index.js';
 import { demoChain, isDemoActive } from './demo.ts';
 
@@ -75,10 +75,12 @@ export async function readLedger(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<MaskLe
     );
   }
 
-  const provider = indexerPublicDataProvider(
-    LOCAL_FALLBACK.indexerUri,
-    LOCAL_FALLBACK.indexerWsUri,
-  );
+  if (!PUBLIC_INDEXER) {
+    throw new ChainUnavailableError(
+      `There is no public indexer for ${NETWORK_ID}. Connect a wallet to read the chain.`,
+    );
+  }
+  const provider = indexerPublicDataProvider(PUBLIC_INDEXER.indexerUri, PUBLIC_INDEXER.indexerWsUri);
 
   const state = await withTimeout(
     provider.queryContractState(CONTRACT_ADDRESS),

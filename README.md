@@ -36,8 +36,9 @@ nothing reaches a chain; the interface says so on every screen while it is on.
 | Contract tests | 155 passing, simulator-based, weighted to refusals |
 | End-to-end browser tests | 50 passing (25 on desktop, 25 on a phone viewport), console errors fail the run |
 | Backend, bot, SDK tests | 56, 56 and 19 passing |
-| Public-network deployment | **Midnight Preprod.** `mask_pay` `0e0e94bb654bb855d85e7428427ecf2d89ddde4d4d9f3737ccc9f1242d12ea29`, `mask_token` `91f9b035cf5d1bb70fcb15f259c782899553b168d635ac790f35e136b92dcdfd`. All 13 `mask_pay` circuit keys are on chain, and 7 end-to-end checks (create, settle, replay refused, non-owner cancel refused, owner cancel, settle-after-cancel refused) passed against the live network; transaction ids are in `deployments/preprod.evidence.json` |
-| Browser wallet write path (Lace) | **Not verified.** The devkit proves every circuit against a local devnet through the same providers; the one untested leg is Lace's `balanceUnsealedTransaction` and `submitTransaction` |
+| Live app | https://mask-midnight.vercel.app, built for **Midnight Preview**, the network Lace's Testnet setting connects to. Reads use Preview's public indexer, so the Explorer works with no wallet |
+| Public-network deployments | **Midnight Preview** (live app): `mask_pay` `8af45bb9a9016fcaa1b1d1cc70fee33822128cc75ae73ee44893a8d7b815b1d5`, `mask_token` `805e8e6c53ae8adbaae6fa8ad1e97dc4cfe1de806109d415bfb79c96a5e3d8b7`. **Midnight Preprod**: `mask_pay` `0e0e94bb654bb855d85e7428427ecf2d89ddde4d4d9f3737ccc9f1242d12ea29`, `mask_token` `91f9b035cf5d1bb70fcb15f259c782899553b168d635ac790f35e136b92dcdfd`. On both, all 13 `mask_pay` circuit keys are on chain and the same 7 end-to-end checks (create, settle, replay refused, non-owner cancel refused, owner cancel, settle-after-cancel refused) passed against the live network. Transaction ids are in `deployments/preview.evidence.json` and `deployments/preprod.evidence.json` |
+| Browser wallet write path (Lace) | **Verified on Midnight Preview with the real Lace 2.4.2 extension:** connect, authorize, create an invoice (confirmed on chain in 42 s) and record a payment against it (confirmed on chain in 44 s, receipt `f74364db…6659`), and the Explorer shows both. Evidence in `deployments/preview.lace-evidence.json`. **Not verified:** the shielded-escrow payment through Lace, because the test wallet holds only unshielded tNIGHT |
 
 This table is regenerated from real runs. A row that cannot be backed by one is marked, not rounded
 up.
@@ -218,13 +219,12 @@ Each of these cost a debugging cycle and is documented where it bites:
 - **Timing correlation is not solved.** On a quiet chain, a create followed closely by a settle
   links the two. That is mitigated by volume, not cryptography, and pretending otherwise would be
   dishonest.
-- **The browser write path is not verified with a real wallet.** Every circuit is proven end to end
-  against the live devnet by the devkit, which assembles the *same* providers and calls the *same*
-  contract — so the contracts, proving and settlement are verified. What is not verified is the one
-  leg the devkit replaces: Lace's `balanceUnsealedTransaction` and `submitTransaction`. Reads
-  through the browser are confirmed working against real chain state; writes through the browser
-  need a Lace install on a network it supports. Stated here rather than left implied by a green
-  QA run.
+- **Shielded escrow through Lace is not verified.** Create and record-only payment are verified with
+  the real extension. Paying with a shielded coin needs shielded tNIGHT in the payer's wallet, which
+  the test wallet did not have; the devkit proves that circuit against a local devnet through the same
+  providers. Running the real wallet also found and fixed two defects the simulators could not reach
+  (see the commit history). Lace's DUST balance appears only after the wallet finishes syncing, which
+  took several minutes per launch in the automated runs, so let it sync before recording a demo.
 
 ## Documents
 

@@ -1,0 +1,52 @@
+{
+  "network": "preview",
+  "contract": "8af45bb9a9016fcaa1b1d1cc70fee33822128cc75ae73ee44893a8d7b815b1d5",
+  "ledgerAfter": {
+    "invoicesCreated": "2",
+    "invoicesOnLedger": "2",
+    "receipts": "1"
+  },
+  "steps": [
+    {
+      "step": "create_invoice",
+      "outcome": "confirmed",
+      "tx": "0089d988bdfbfc8d0687ecaa953dca4f8531788902701aecb94d7e5027532cc098",
+      "block": 1316055,
+      "detail": "commitment 40e29cfa7cd96a9d…"
+    },
+    {
+      "step": "cancel by non-owner",
+      "outcome": "refused",
+      "detail": "not the invoice owner"
+    },
+    {
+      "step": "settle_invoice",
+      "outcome": "confirmed",
+      "tx": "00d191ad296cac540c1e2f443dc034fa51da7c4e6b9a3759c04eed87c3329d088f",
+      "block": 1316060,
+      "detail": "receipt 669bd8bb699d84fb…"
+    },
+    {
+      "step": "replay settle",
+      "outcome": "refused",
+      "detail": "invoice is not open"
+    },
+    {
+      "step": "create second invoice",
+      "outcome": "confirmed",
+      "tx": "008cc413696bb4f8a0188aa3dc91ed97967db3c99d253bed6b040e2e15f593ead1",
+      "block": 1316064
+    },
+    {
+      "step": "cancel by owner",
+      "outcome": "confirmed",
+      "tx": "00d30a0b62bb140466f7ce4679d32b5c72fca5092ad51f4bbb393d1e20b680dfec",
+      "block": 1316068
+    },
+    {
+      "step": "settle cancelled invoice",
+      "outcome": "refused",
+      "detail": "invoice is not open"
+    }
+  ]
+}

@@ -13,7 +13,6 @@ import { demoChain, isDemoProviders } from './demo.ts';
 import {
   MaskPayContract,
   PRIVATE_STATE_ID,
-  emptyPrivateState,
   type MaskPrivateState,
 } from './contract.ts';
 
@@ -109,20 +108,26 @@ export function useCircuit(
 
         const wired = instrument(providers, setStage);
 
-        // Private state is set immediately before the call, because each
-        // circuit needs the terms of one specific invoice.
-        await (wired.privateStateProvider as {
-          set(id: string, s: MaskPrivateState): Promise<void>;
-        }).set(PRIVATE_STATE_ID, privateState);
-
+        // findDeployedContract installs `initialPrivateState` in the provider,
+        // replacing whatever is stored. Setting the invoice's terms first and
+        // joining second therefore ran the first circuit of every page load
+        // against an empty state: amount 0, so an invoice was committed with
+        // amount 0, and paying it failed with "coin value does not match".
+        // Join first, then set the terms for this call.
         if (!joined.current) {
           joined.current = await findDeployedContract(wired as never, {
             contractAddress: contractAddress as string,
             compiledContract: MaskPayContract,
             privateStateId: PRIVATE_STATE_ID,
-            initialPrivateState: emptyPrivateState(),
+            initialPrivateState: privateState,
           } as never);
         }
+
+        // Private state is set immediately before the call, because each
+        // circuit needs the terms of one specific invoice.
+        await (wired.privateStateProvider as {
+          set(id: string, s: MaskPrivateState): Promise<void>;
+        }).set(PRIVATE_STATE_ID, privateState);
 
         const callTx = (joined.current as { callTx: Record<string, (...a: unknown[]) => Promise<unknown>> })
           .callTx;

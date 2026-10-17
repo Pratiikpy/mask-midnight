@@ -15,3 +15,4 @@ deployments/undeployed.*
 __pycache__/
 *.pyc
 .pytest_cache/
+app/dist-preview/

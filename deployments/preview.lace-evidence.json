@@ -1,0 +1,20 @@
+{
+  "network": "preview",
+  "wallet": "Lace 2.4.2 browser extension, Midnight account (disposable test wallet)",
+  "app": "Mask built for preview, served over http://127.0.0.1",
+  "contract": "8af45bb9a9016fcaa1b1d1cc70fee33822128cc75ae73ee44893a8d7b815b1d5",
+  "create_invoice": {
+    "result": "Confirmed on chain",
+    "seconds": 42,
+    "commitment_prefix": "8a3199b0bdfe7d"
+  },
+  "settle_invoice_record_only": {
+    "result": "Confirmed on chain",
+    "seconds": 44,
+    "receipt": "f74364db9edea2f1a06f9549b3ea33cbe957734a25b054730a7d28f3023a6659"
+  },
+  "explorer_after": { "invoices": 4, "settled": 2, "receipts": 2 },
+  "not_verified": [
+    "settle_invoice_shielded through Lace: the test wallet holds unshielded tNIGHT only, so Lace cannot fund a shielded payment coin"
+  ]
+}

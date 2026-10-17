@@ -19,6 +19,29 @@ export const LOCAL_FALLBACK = {
   proverServerUri: 'http://localhost:6300',
 } as const;
 
+/**
+ * Public read-only indexer for the configured network, used when no wallet is
+ * connected (the Explorer, receipts opened from a link). A wallet that is
+ * connected always overrides it with its own endpoints.
+ *
+ * Preview has a public, CORS-open indexer. Preprod's public indexer was retired
+ * (HTTP 410) and the replacement needs a project token that must not ship in a
+ * browser bundle, so a Preprod build reads the chain only through a wallet.
+ */
+export const PUBLIC_INDEXER: { indexerUri: string; indexerWsUri: string } | null = (() => {
+  switch (NETWORK_ID) {
+    case 'preview':
+      return {
+        indexerUri: 'https://indexer.preview.midnight.network/api/v4/graphql',
+        indexerWsUri: 'wss://indexer.preview.midnight.network/api/v4/graphql/ws',
+      };
+    case 'undeployed':
+      return { indexerUri: LOCAL_FALLBACK.indexerUri, indexerWsUri: LOCAL_FALLBACK.indexerWsUri };
+    default:
+      return null;
+  }
+})();
+
 /** Address of the deployed mask_pay contract, if one is configured. */
 export const CONTRACT_ADDRESS: string | undefined = import.meta.env.VITE_CONTRACT_ADDRESS as
   | string
