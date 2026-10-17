@@ -1,6 +1,7 @@
 {
   "name": "@mask/midnight-devkit",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "description": "Mask's headless harness for the local Midnight devnet: funded wallets, contract deploy, circuit calls, and round-trip verification.",
