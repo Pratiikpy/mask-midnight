@@ -34,11 +34,11 @@ nothing reaches a chain; the interface says so on every screen while it is on.
 | | |
 |---|---|
 | Contract tests | 155 passing, simulator-based, weighted to refusals |
-| End-to-end browser tests | 50 passing (25 on desktop, 25 on a phone viewport), console errors fail the run |
+| End-to-end browser tests | 56 passing (28 on desktop, 28 on a phone viewport), console errors fail the run |
 | Backend, bot, SDK tests | 56, 56 and 19 passing |
 | Live app | https://mask-midnight.vercel.app, built for **Midnight Preview**, the network Lace's Testnet setting connects to. Reads use Preview's public indexer, so the Explorer works with no wallet |
 | Public-network deployments | **Midnight Preview** (live app): `mask_pay` `8af45bb9a9016fcaa1b1d1cc70fee33822128cc75ae73ee44893a8d7b815b1d5`, `mask_token` `805e8e6c53ae8adbaae6fa8ad1e97dc4cfe1de806109d415bfb79c96a5e3d8b7`. **Midnight Preprod**: `mask_pay` `0e0e94bb654bb855d85e7428427ecf2d89ddde4d4d9f3737ccc9f1242d12ea29`, `mask_token` `91f9b035cf5d1bb70fcb15f259c782899553b168d635ac790f35e136b92dcdfd`. On both, all 13 `mask_pay` circuit keys are on chain and the same 7 end-to-end checks (create, settle, replay refused, non-owner cancel refused, owner cancel, settle-after-cancel refused) passed against the live network. Transaction ids are in `deployments/preview.evidence.json` and `deployments/preprod.evidence.json` |
-| Browser wallet write path (Lace) | **Verified on Midnight Preview with the real Lace 2.4.2 extension:** connect, authorize, create an invoice (confirmed on chain in 42 s) and record a payment against it (confirmed on chain in 44 s, receipt `f74364db…6659`), and the Explorer shows both. Evidence in `deployments/preview.lace-evidence.json`. **Not verified:** the shielded-escrow payment through Lace, because the test wallet holds only unshielded tNIGHT |
+| Browser wallet write path (Lace) | **Verified on Midnight Preview with the real Lace 2.4.2 extension, in one recorded 749 s session on the deployed app at https://mask-midnight.vercel.app:** connect, create an invoice (48 s), pay it with a shielded mUSDC coin (67 s), the same payment refused a second time, a refund with the payer's code (64 s), four invoices paid in one batch proof (100 s), a revenue proof over those four payments (122 s), an owner cancel (40 s) and a payment to the cancelled invoice refused by the contract. Cross-checked on the public indexer with the CLI (`mask stats`, `mask receipt`, `mask attestation`) and on the Verify page with no wallet. Evidence in `deployments/preview.lace-evidence.json`. **Not on Preview:** gift cards and Mask Card, whose contracts are not deployed there |
 
 This table is regenerated from real runs. A row that cannot be backed by one is marked, not rounded
 up.
@@ -66,6 +66,17 @@ proves it:
 - **Privacy tests that can fail.** The earlier transcript tests searched an empty string. They now
   read each call's real public transcript and every ledger collection, and prove the search sighted
   first. `contracts/test/privacy-observer.test.ts`.
+- **Revenue proofs work in the app.** The Prove revenue page used to end in a hard-coded error. It
+  now reads the receipt tree from the ledger, takes each payer's payment code, runs
+  `attest_revenue_at_least` and publishes the digest, and a verifier finds it on the Verify page.
+  `app/e2e/demo-flow.spec.ts` covers a true claim, a claim above the real total, a code that is not a
+  code and evidence that names a different payment, which the contract refuses in its own words.
+- **The dashboard reads settlement from the chain.** A payer settles from another browser, so the
+  merchant's local record stayed "open" and kept offering to cancel a paid invoice. It now reads the
+  status back from the ledger, and the Prove revenue page does the same.
+- **Payment codes.** A receipt, and each of the four receipts of a batch payment, comes with a code
+  carrying the payer's key, the payment index and the receipt. A merchant needs it to refund a
+  payment or to count it in a revenue proof; only the payer holds the key that names it.
 - **Demo mode.** The real contract in the browser, no wallet. `app/e2e/demo-flow.spec.ts`.
 - **A browser suite** over every route and the full payment, refund and cancel stories, on desktop
   and mobile.
@@ -155,7 +166,7 @@ impossible, and value moves as a shielded coin, so sender, recipient and amount 
 
 ```bash
 cd contracts && npx vitest run          # 155 contract tests, offline, a few seconds
-cd ../app && npm run test:e2e           # 50 browser tests against a production build
+cd ../app && npm run test:e2e           # 56 browser tests against a production build
 bash qa.sh                              # every suite plus live checks; needs the devnet running
 ```
 
@@ -201,6 +212,7 @@ Each of these cost a debugging cycle and is documented where it bites:
 
 - **Proving keys are 161 MB** in `app/public`. Fine on a devnet; a public deployment needs a CDN and
   per-circuit lazy fetching.
+- **Gift cards and Mask Card are not deployed to Preview.** They run against the real contracts in demo mode, and the film labels those clips as demo mode. Everything else in the film was recorded through Lace on Preview.
 - **Revenue attestation is fixed at 4 payments.** Circuits cannot loop over variable-length data.
   Larger batches mean compiling a wider variant.
 - **The Python SDK cannot read chain state.** That needs Midnight's WASM ledger decoder; a
@@ -219,17 +231,13 @@ Each of these cost a debugging cycle and is documented where it bites:
 - **Timing correlation is not solved.** On a quiet chain, a create followed closely by a settle
   links the two. That is mitigated by volume, not cryptography, and pretending otherwise would be
   dishonest.
-- **Shielded escrow through Lace is not verified.** Create and record-only payment are verified with
-  the real extension. Paying with a shielded coin needs shielded tNIGHT in the payer's wallet, which
-  the test wallet did not have; the devkit proves that circuit against a local devnet through the same
-  providers. Running the real wallet also found and fixed two defects the simulators could not reach
-  (see the commit history). Lace's DUST balance appears only after the wallet finishes syncing, which
-  took several minutes per launch in the automated runs, so let it sync before recording a demo.
+- **An unmodified Chrome has not been tested against Lace's local proof server.** A hosted https page could not reach it in an unmodified Chromium test browser (the request failed and the app reported a timeout); the recording browser was started with Chromium's local-network checks off. Whether an interactive Chrome asks the user for permission instead is not verified. Running the real wallet found and fixed defects the simulators could not reach, the latest being the payer address format inside refund and payment codes (see the commit history). Lace's DUST balance appears only after the wallet finishes syncing, which took several minutes per launch in the automated runs, so let it sync before recording a demo.
 
 ## Documents
 
 | | |
 |---|---|
+| `docs/pitch-deck.pdf` | The pitch deck, 14 slides |
 | `docs/THREAT-MODEL.md` | What was attacked, what was found, what is still open |
 | `docs/CONTRACT-STATUS.md` | Contract status and measured on-chain results |
 | `docs/TOOLCHAIN-LOG.md` | Environment findings, verified by execution |

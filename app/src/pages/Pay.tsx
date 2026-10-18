@@ -133,7 +133,8 @@ export function PayPage() {
         code = encodeRefundCode({
           payerKey: toHex(payerKey),
           paymentIndex: privateState.paymentIndex.toString(),
-          payerAddr: connection.coinPublicKey,
+          payerAddr: coinPublicKeyHex(connection.coinPublicKey),
+          receipt: receiptHex,
         });
         setRefundCode(code);
       }
@@ -298,8 +299,9 @@ export function PayPage() {
               <div className="rounded-2xl border border-line bg-surface-2 p-5">
                 <Badge>refund code</Badge>
                 <p className="mt-2 text-sm text-ink-dim">
-                  Only if you ask for a refund: send this to the merchant, privately. It names this
-                  payment and where the refund should go. Do not post it.
+                  Only if you ask for a refund, or the merchant needs to count this payment in a
+                  revenue proof: send this to them, privately. It names this payment and where a
+                  refund should go. Do not post it.
                 </p>
                 <p className="mt-3 break-all font-mono text-xs text-ink-faint">{refundCode}</p>
                 <Button

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Card, Digest, ErrorNote, Field, Input, PrivacyNote, PageHeader } from '../components/ui.tsx';
 import { ProofProgress } from '../components/ProofProgress.tsx';
 import { formatAmount, fromHex, randomBytes, shortHex } from '../lib/format.ts';
@@ -12,6 +12,7 @@ import {
   shareLink,
   type InvoiceRecord,
 } from '../lib/invoice.ts';
+import { syncInvoiceStatuses } from '../lib/sync.ts';
 import { CONTRACT_ADDRESS } from '../lib/config.ts';
 import { privateStateFromTerms } from '../lib/contract.ts';
 import { forgetPayment, loadPayments, type PaymentRecord } from '../lib/payments.ts';
@@ -404,6 +405,17 @@ export function DashboardPage() {
   const [view, setView] = useState<View>('dashboard');
   const [list, setList] = useState<List>('created');
   const [filter, setFilter] = useState<Filter>('all');
+
+  // A payer settles from another browser, so read the statuses back from the chain.
+  const syncFromChain = useCallback(async () => {
+    if (await syncInvoiceStatuses()) setInvoices(loadInvoices());
+  }, []);
+
+  useEffect(() => {
+    void syncFromChain();
+    const timer = setInterval(() => void syncFromChain(), 6_000);
+    return () => clearInterval(timer);
+  }, [syncFromChain]);
 
   const shown = useMemo(() => {
     if (filter === 'all') return invoices;

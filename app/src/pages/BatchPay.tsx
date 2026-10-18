@@ -22,7 +22,10 @@ import { useMask } from '../providers/MaskProvider.tsx';
 import { useCircuit } from '../lib/useCircuit.ts';
 import { CONTRACT_ADDRESS } from '../lib/config.ts';
 import { emptyPrivateState } from '../lib/contract.ts';
-import { formatAmount, fromHex, randomBytes, toHex } from '../lib/format.ts';
+import { formatAmount, fromHex, randomBytes, shortHex, toHex } from '../lib/format.ts';
+import { encodeRefundCode } from '../lib/refund.ts';
+import { savePayment } from '../lib/payments.ts';
+import { coinPublicKeyHex } from '../lib/wallet.ts';
 import {
   InvoiceKind,
   TOKEN_LABEL,
@@ -46,6 +49,7 @@ export function BatchPayPage() {
   const { connection, connect, providers } = useMask();
   const [slots, setSlots] = useState<Slot[]>(SLOTS.map(emptySlot));
   const [receipts, setReceipts] = useState<string[] | null>(null);
+  const [codes, setCodes] = useState<string[]>([]);
   const circuit = useCircuit(providers as Record<string, unknown> | null, CONTRACT_ADDRESS);
 
   const filled = slots.filter((s) => s.terms !== null);
@@ -105,6 +109,7 @@ export function BatchPayPage() {
   async function payAll() {
     if (!ready || mismatch || duplicate) return;
     setReceipts(null);
+    setCodes([]);
     circuit.reset();
 
     const entries = filled.map((s) => s.terms!);
@@ -129,7 +134,33 @@ export function BatchPayPage() {
         [entries[0]!.kind, entries[0]!.token],
       )) as { private: { result: Uint8Array[] } };
 
-      setReceipts(out.private.result.map((r) => toHex(r)));
+      const hexes = out.private.result.map((r) => toHex(r));
+      setReceipts(hexes);
+      // Each merchant needs its own payment's code to refund it or to count it
+      // in a revenue proof, and only this browser holds the key that names it.
+      // Kept here on this device until the payer chooses to send them.
+      if (connection.status === 'connected') {
+        const made = hexes.map((receipt) =>
+          encodeRefundCode({
+            payerKey: toHex(payerKey),
+            paymentIndex: '0',
+            payerAddr: coinPublicKeyHex(connection.coinPublicKey),
+            receipt,
+          }),
+        );
+        setCodes(made);
+        hexes.forEach((receipt, i) =>
+          savePayment({
+            receipt,
+            amount: entries[i]!.amount,
+            token: entries[i]!.token,
+            merchant: shortHex(entries[i]!.merchantKey, 8, 4),
+            paidAt: Date.now(),
+            refundCode: made[i],
+            items: entries[i]!.items?.map((it) => it.name),
+          }),
+        );
+      }
     } catch {
       // useCircuit surfaces the contract's own assert message.
     }
@@ -229,6 +260,32 @@ export function BatchPayPage() {
                   <p key={r} className="break-all font-mono text-xs text-aurora">
                     {r}
                   </p>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {receipts && codes.length > 0 ? (
+            <div className="rounded-2xl border border-line bg-surface-2 p-5">
+              <Badge>payment codes</Badge>
+              <p className="mt-2 text-sm text-ink-dim">
+                Only if a merchant asks for a refund, or needs to count a payment in a revenue
+                proof: send that payment's code to that merchant, privately. Do not post them.
+              </p>
+              <div className="mt-3 space-y-3">
+                {codes.map((c, i) => (
+                  <div key={receipts[i]} className="flex items-center gap-3">
+                    <p className="min-w-0 flex-1 truncate font-mono text-xs text-ink-faint">
+                      {formatAmount(BigInt(filled[i]?.terms?.amount ?? '0'))} · {c}
+                    </p>
+                    <Button
+                      variant="ghost"
+                      className="shrink-0 px-3 py-1.5 text-xs"
+                      onClick={() => void navigator.clipboard?.writeText(c)}
+                    >
+                      Copy code {i + 1}
+                    </Button>
+                  </div>
                 ))}
               </div>
             </div>

@@ -5,7 +5,7 @@
   "type": "module",
   "bin": { "mask": "./dist/cli.js" },
   "files": ["dist", "README.md"],
-  "engines": { "node": ">=22.0.0" },
+  "engines": { "node": ">=24.0.0" },
   "scripts": { "build": "tsc" },
   "license": "Apache-2.0",
   "dependencies": {

@@ -6,7 +6,7 @@
 // code, privately, over whatever channel they already use.
 //
 // It carries the payer's key and the payment index (which together name one
-// receipt) and the shielded coin key the refund should be sent to. It does not
+// receipt), the receipt itself and the shielded coin key the refund should be sent to. It does not
 // carry the invoice, the amount, or anything the merchant does not already hold.
 // It is as sensitive as the payment link: whoever has it can read which payment
 // it names and where its refund goes.
@@ -15,6 +15,12 @@ export interface RefundCode {
   payerKey: string; // hex, 32 bytes
   paymentIndex: string; // decimal
   payerAddr: string; // hex, the payer's shielded coin public key
+  /**
+   * The receipt the payment published. Public on the ledger already, and it is
+   * what lets a merchant find the payment in the receipt tree when proving
+   * revenue. Codes made before revenue proofs existed do not carry it.
+   */
+  receipt?: string; // hex, 32 bytes
 }
 
 export function encodeRefundCode(code: RefundCode): string {
@@ -28,6 +34,9 @@ export function decodeRefundCode(encoded: string): RefundCode | null {
     if (typeof parsed.payerKey !== 'string' || !/^[0-9a-f]{64}$/i.test(parsed.payerKey)) return null;
     if (typeof parsed.payerAddr !== 'string' || !/^[0-9a-f]{64}$/i.test(parsed.payerAddr)) return null;
     if (typeof parsed.paymentIndex !== 'string' || !/^\d+$/.test(parsed.paymentIndex)) return null;
+    if (parsed.receipt !== undefined && (typeof parsed.receipt !== 'string' || !/^[0-9a-f]{64}$/i.test(parsed.receipt))) {
+      return null;
+    }
     return parsed as RefundCode;
   } catch {
     return null;

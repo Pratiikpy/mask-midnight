@@ -78,6 +78,134 @@ test.describe('demo mode, one party', () => {
     expect(problems, problems.join('\n')).toEqual([]);
   });
 
+  test('the merchant dashboard learns that a payer settled the invoice', async ({ page }) => {
+    const problems: string[] = [];
+    watch(page, problems);
+    await startDemo(page);
+
+    const link = await createInvoice(page, '2750');
+    await goTo(page, 'Pay');
+    await loadLink(page, link);
+    await page.getByRole('button', { name: /^Pay 2,750/ }).click();
+    await expect(page.getByText(/Keep this\. It proves the payment happened/)).toBeVisible();
+
+    // The vault only knew "open". The dashboard reads the chain and must now say
+    // settled, and must stop offering to cancel an invoice that has been paid.
+    await goTo(page, 'Dashboard');
+    await expect(page.getByText('settled', { exact: true }).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: 'Cancel invoice' })).toHaveCount(0);
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  test('revenue proof: four paid invoices, a true claim publishes and a verifier finds it', async ({
+    page,
+  }) => {
+    const problems: string[] = [];
+    watch(page, problems);
+    await startDemo(page);
+
+    // Four payments, 120 + 340 + 560 + 780 = 1,800. Each payer's code is kept.
+    const codes: string[] = [];
+    for (const [n, amount] of ['120', '340', '560', '780'].entries()) {
+      // startDemo leaves us on the create page already; a phone's menu stays open
+      // when a link points at the page it is on, so only navigate when we must.
+      if (n > 0) await goTo(page, 'Create Invoice');
+      const link = await createInvoice(page, amount);
+      await goTo(page, 'Pay');
+      await loadLink(page, link);
+      await page.getByRole('button', { name: new RegExp(`^Pay ${Number(amount).toLocaleString('en-US')}`) }).click();
+      await expect(page.getByText(/Keep this\. It proves the payment happened/)).toBeVisible();
+      const node = page.locator('p.font-mono', { hasText: /^ey/ }).last();
+      await expect(node).toBeVisible();
+      codes.push((await node.textContent())!.trim());
+    }
+
+    await page.locator('footer').getByRole('link', { name: 'Prove revenue', exact: true }).click();
+    // Settlement happens in the payer's browser, so the page reads it from the chain.
+    const rows = page.locator('button[aria-pressed]');
+    await expect(rows).toHaveCount(4, { timeout: 15_000 });
+    const publish = page.getByRole('button', { name: 'Publish attestation' });
+    await expect(publish).toBeDisabled();
+
+    for (let i = 0; i < 4; i++) await rows.nth(i).click();
+    const fields = page.getByLabel(/^Payment code for/);
+    await expect(fields).toHaveCount(4);
+    // A code that is not a code is named as one.
+    await fields.nth(0).fill('not a code');
+    await expect(page.getByText('That is not a payment code.')).toBeVisible();
+    await expect(publish).toBeDisabled();
+
+    // Each invoice shows up newest first, so the codes pair up in reverse.
+    for (let i = 0; i < 4; i++) await fields.nth(i).fill(codes[3 - i]!);
+    await expect(page.getByText('Payment code accepted.')).toHaveCount(4);
+
+    // A claim above the true total is refused before anything is proved.
+    await page.getByPlaceholder('100000').fill('1801');
+    await expect(publish).toBeDisabled();
+    await page.getByPlaceholder('100000').fill('1500');
+    await expect(publish).toBeEnabled();
+    await publish.click();
+
+    await expect(page.getByText('attestation published')).toBeVisible({ timeout: 30_000 });
+    const digest = (await page.locator('p.font-mono.text-aurora').last().textContent())!.trim();
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+
+    // Evidence that names a different payment than the amount beside it is
+    // refused by the contract itself, not by the page.
+    await fields.nth(0).fill(codes[2]!);
+    await fields.nth(1).fill(codes[3]!);
+    await publish.click();
+    await expect(page.getByText('merkle path does not match the claimed payment').first()).toBeVisible({
+      timeout: 30_000,
+    });
+
+    await page.locator('footer').getByRole('link', { name: 'Verify a payment', exact: true }).click();
+    await page.getByPlaceholder('fd6993cf63c635d3…').fill(digest);
+    await page.getByRole('button', { name: 'Check on chain' }).click();
+    await expect(page.getByText('attestation', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText(/chain accepted the proof/).first()).toBeVisible();
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  test('a batch payment hands the payer one code per invoice, and they prove revenue too', async ({
+    page,
+  }) => {
+    const problems: string[] = [];
+    watch(page, problems);
+    await startDemo(page);
+
+    const links: string[] = [];
+    for (const [n, amount] of ['210', '320', '430', '540'].entries()) {
+      // The page stays on the finished invoice until asked for another.
+      if (n > 0) await page.getByRole('button', { name: 'Create another' }).click();
+      links.push(await createInvoice(page, amount));
+    }
+    await page.locator('footer').getByRole('link', { name: 'Batch pay', exact: true }).click();
+    const slots = page.getByPlaceholder('https://…/pay#…');
+    for (let i = 0; i < 4; i++) await slots.nth(i).fill(links[i]!);
+    await page.getByRole('button', { name: 'Pay all four' }).click();
+    await expect(page.getByText('four receipts')).toBeVisible({ timeout: 30_000 });
+
+    // One code per payment, in the order the invoices were entered.
+    await expect(page.getByText('payment codes')).toBeVisible();
+    const text = await page.locator('main').innerText();
+    const codes = text.match(/ey[A-Za-z0-9_-]{40,}/g) ?? [];
+    expect(codes).toHaveLength(4);
+
+    await page.locator('footer').getByRole('link', { name: 'Prove revenue', exact: true }).click();
+    const rows = page.locator('button[aria-pressed]');
+    await expect(rows).toHaveCount(4, { timeout: 15_000 });
+    for (let i = 0; i < 4; i++) await rows.nth(i).click();
+    const fields = page.getByLabel(/^Payment code for/);
+    for (let i = 0; i < 4; i++) await fields.nth(i).fill(codes[3 - i]!);
+    await expect(page.getByText('Payment code accepted.')).toHaveCount(4);
+    // 210 + 320 + 430 + 540 = 1,500; a claim of exactly the total holds.
+    await page.getByPlaceholder('100000').fill('1500');
+    await page.getByRole('button', { name: 'Publish attestation' }).click();
+    await expect(page.getByText('attestation published')).toBeVisible({ timeout: 30_000 });
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
   test('record-only payment closes the invoice without moving a coin', async ({ page }) => {
     const problems: string[] = [];
     watch(page, problems);

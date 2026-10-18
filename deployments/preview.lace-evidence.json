@@ -13,8 +13,137 @@
     "seconds": 44,
     "receipt": "f74364db9edea2f1a06f9549b3ea33cbe957734a25b054730a7d28f3023a6659"
   },
-  "explorer_after": { "invoices": 4, "settled": 2, "receipts": 2 },
+  "explorer_after": {
+    "invoices": 4,
+    "settled": 2,
+    "receipts": 2
+  },
   "not_verified": [
-    "settle_invoice_shielded through Lace: the test wallet holds unshielded tNIGHT only, so Lace cannot fund a shielded payment coin"
-  ]
+    "gift cards and Mask Card on Preview: those contracts are not deployed there",
+    "an interactive, unmodified Chrome reaching Lace's local proof server from the hosted https page: the recording browser ran with Chromium's local-network checks off"
+  ],
+  "hosted_app_story_run": {
+    "date": "2026-10-17",
+    "app": "https://mask-midnight.vercel.app (the deployed Preview build), real Lace 2.4.2 extension, local proof server on 127.0.0.1:6300, one browser session recorded from start to finish",
+    "steps": [
+      {
+        "step": "connect Lace",
+        "result": "connected"
+      },
+      {
+        "step": "create_invoice",
+        "result": "Confirmed on chain",
+        "seconds": 43
+      },
+      {
+        "step": "settle_invoice (record-only)",
+        "result": "Confirmed on chain",
+        "seconds": 51,
+        "receipt_as_shown_by_explorer": "4d2d7eac0dcdcf8dcde0…2d73a9fc2677"
+      },
+      {
+        "step": "settle the same invoice again",
+        "result": "refused: invoice is not open"
+      },
+      {
+        "step": "create_invoice (second)",
+        "result": "Confirmed on chain",
+        "seconds": 40
+      },
+      {
+        "step": "cancel_invoice as owner",
+        "result": "Confirmed on chain",
+        "seconds": 47
+      },
+      {
+        "step": "settle the cancelled invoice",
+        "result": "refused: invoice is not open"
+      }
+    ],
+    "explorer_after": {
+      "invoices": 7,
+      "open": 1,
+      "settled": 4,
+      "cancelled": 2,
+      "receipts": 4
+    },
+    "cross_check": "mask stats read 7 invoices created from the public Preview indexer after the run",
+    "timings_note": "seconds are from the click to the confirmation shown by the app, less the few seconds the recording waits on screen"
+  },
+  "final_session": {
+    "date": "2026-10-18",
+    "app": "https://mask-midnight.vercel.app (deployed Preview build), real Lace 2.4.2 extension, local proof server on 127.0.0.1:6300, one browser session recorded from start to finish, 749 s, no console or page errors",
+    "funding": {
+      "note": "mask_token.mint is open on testnet; the funded wallet minted 1500 mUSDC and sent the shielded coin to the Lace wallet",
+      "mint_tx": "00ca30b4a186a7be95d9a7b597dc850006eef4e19f15729b1373846f71d31ccd2e",
+      "transfer_tx": "000e2f375e6277446b91ed1826cecdd0466dcc02b8962384a332cc034564089770"
+    },
+    "steps": [
+      {
+        "step": "connect Lace",
+        "result": "connected"
+      },
+      {
+        "step": "create_invoice, 1,500 mUSDC",
+        "result": "Confirmed on chain",
+        "seconds": 48
+      },
+      {
+        "step": "settle_invoice with a shielded mUSDC coin",
+        "result": "Confirmed on chain",
+        "seconds": 67,
+        "receipt": "f6a838b2c990f520b1750d80f55692b905373bd674eccd658fc1562259f24fd3"
+      },
+      {
+        "step": "settle the same invoice again",
+        "result": "refused: invoice is not open"
+      },
+      {
+        "step": "refund the payment with the payer's refund code",
+        "result": "Confirmed on chain",
+        "seconds": 64
+      },
+      {
+        "step": "create four invoices (tNIGHT)",
+        "result": "Confirmed on chain"
+      },
+      {
+        "step": "batch pay: four invoices in one proof",
+        "result": "Confirmed on chain, four receipts",
+        "seconds": 100,
+        "receipts": [
+          "d1b7c92bfaa575f6e0436f44dcb9bd2a806ab51f99f68454c59b86e662b8bb20",
+          "60111907d5fc0d110e39c0ceae17011b88d97519c1bf808bf74c6ba1037602d7",
+          "26036f9d30bd89a1a344c2c12c8a0d0829defe0e0bd3169ce257096f892101b9",
+          "a17314b15f03c77865b73706f5465e02f87aa232886c0fc8264c632ea68cc3bc"
+        ]
+      },
+      {
+        "step": "revenue attestation over those four payments, threshold 1,500",
+        "result": "attestation published",
+        "seconds": 122,
+        "digest": "aa9143a68d7c4803b872183981074cc3115e51a280ba82dc8ef2a672858cae14"
+      },
+      {
+        "step": "create_invoice, cancel as owner",
+        "result": "Confirmed on chain",
+        "seconds": 40
+      },
+      {
+        "step": "settle the cancelled invoice",
+        "result": "refused: invoice is not open"
+      }
+    ],
+    "explorer_after": {
+      "invoices": 33,
+      "open": 6,
+      "settled": 24,
+      "receipts": 24,
+      "revenue_attestations": 2,
+      "refunds": 2,
+      "note": "contract totals since deployment, not this session alone"
+    },
+    "cross_check": "mask stats read 33 invoices from the public Preview indexer; mask receipt returned true for the shielded payment receipt; mask attestation returned true for the digest; the Verify page, in a fresh browser with no wallet, found the attestation and two receipts and reported a made-up digest as not found",
+    "bug_found_and_fixed": "With a real wallet the payer address inside refund and payment codes was the bech32 coin public key; the decoder requires hex, so refunds and revenue proofs would have failed for every Lace user. The app now writes the hex form."
+  }
 }

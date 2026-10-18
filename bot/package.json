@@ -4,7 +4,7 @@
   "description": "Mask on Midnight — a Telegram bot that reads public state and never holds a secret.",
   "type": "module",
   "main": "src/index.ts",
-  "engines": { "node": ">=22.0.0" },
+  "engines": { "node": ">=24.0.0" },
   "scripts": {
     "start": "node --experimental-strip-types src/index.ts",
     "test": "vitest run"

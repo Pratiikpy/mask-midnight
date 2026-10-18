@@ -67,8 +67,9 @@ export function MaskProvider({ children }: { children: ReactNode }) {
     setMode('demo');
     setConnection({
       status: 'connected',
-      // A fixed, obviously synthetic key: demo payments go nowhere.
-      coinPublicKey: 'de'.repeat(32),
+      // The coin key of a disposable test wallet, in the bech32m form a real connector returns,
+      // so demo mode exercises the same decoding. Demo payments go nowhere.
+      coinPublicKey: 'mn_shield-cpk_preview1eqp3vuy4h76pu65uhu4pl6nxswmzzk0f5us9ye8d9f7m3hm9zhks2lvvj4',
       proverUri: 'in this browser (no proof generated)',
       indexerUri: 'simulated ledger',
     });

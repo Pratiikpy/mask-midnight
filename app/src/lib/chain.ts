@@ -29,6 +29,7 @@ export interface MaskLedger {
     size(): bigint;
     [Symbol.iterator](): Iterator<Uint8Array>;
   };
+  receipt_tree: { findPathForLeaf(leaf: Uint8Array): unknown };
   attestations: { member(k: Uint8Array): boolean; size(): bigint };
   refunded: { member(k: Uint8Array): boolean; size(): bigint };
   created: bigint;

@@ -1,35 +1,64 @@
-import { useMemo, useState } from 'react';
-import { Badge, Button, Card, ErrorNote, Field, Input, PrivacyNote, PageHeader } from '../components/ui.tsx';
-import { ProofProgress, type Stage } from '../components/ProofProgress.tsx';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Badge, Button, Card, Digest, ErrorNote, Field, Input, PrivacyNote, PageHeader } from '../components/ui.tsx';
+import { ProofProgress } from '../components/ProofProgress.tsx';
 import { useMask } from '../providers/MaskProvider.tsx';
-import { formatAmount, parseAmount } from '../lib/format.ts';
-import { TOKEN_LABEL, loadInvoices } from '../lib/invoice.ts';
+import { formatAmount, fromHex, parseAmount, toHex } from '../lib/format.ts';
+import { KIND_LABEL, TOKEN_LABEL, loadInvoices, type InvoiceRecord } from '../lib/invoice.ts';
+import { readLedger, describeChainError } from '../lib/chain.ts';
+import { CONTRACT_ADDRESS } from '../lib/config.ts';
+import { emptyPrivateState } from '../lib/contract.ts';
+import { decodeRefundCode, type RefundCode } from '../lib/refund.ts';
+import { syncInvoiceStatuses } from '../lib/sync.ts';
+import { useCircuit } from '../lib/useCircuit.ts';
 
 const BATCH = 4;
 
 export function AttestPage() {
-  const { connection, connect } = useMask();
+  const { providers, connection, connect } = useMask();
+  const circuit = useCircuit(providers as Record<string, unknown> | null, CONTRACT_ADDRESS);
   const [threshold, setThreshold] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
-  const [stage, setStage] = useState<Stage>('idle');
-  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [codes, setCodes] = useState<Record<string, string>>({});
+  const [invoices, setInvoices] = useState<InvoiceRecord[]>(() => loadInvoices());
   const [error, setError] = useState<string | null>(null);
+  const [digest, setDigest] = useState<string | null>(null);
 
   // Only settled invoices have a receipt on the tree to prove membership of.
-  const eligible = useMemo(() => loadInvoices().filter((i) => i.status === 'settled'), []);
+  // Settlement happens in the payer's browser, so read it back from the chain.
+  const refresh = useCallback(async () => {
+    if (await syncInvoiceStatuses()) setInvoices(loadInvoices());
+  }, []);
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => void refresh(), 6_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
 
-  const trueTotal = useMemo(
-    () =>
-      eligible
-        .filter((i) => selected.includes(i.salt))
-        .reduce((sum, i) => sum + BigInt(i.amount), 0n),
+  const eligible = useMemo(() => invoices.filter((i) => i.status === 'settled'), [invoices]);
+  const chosen = useMemo(
+    () => selected.map((salt) => eligible.find((i) => i.salt === salt)).filter((i): i is InvoiceRecord => !!i),
     [eligible, selected],
   );
+  const trueTotal = useMemo(() => chosen.reduce((sum, i) => sum + BigInt(i.amount), 0n), [chosen]);
+
+  // Each payment needs the evidence only its payer holds: the payer key, the
+  // payment index and the receipt. The payer's payment code carries all three.
+  const decoded = useMemo(() => {
+    const out: Record<string, RefundCode | null> = {};
+    for (const i of chosen) out[i.salt] = codes[i.salt] ? decodeRefundCode(codes[i.salt]) : null;
+    return out;
+  }, [chosen, codes]);
+  const missing = chosen.filter((i) => !decoded[i.salt]);
+  const withoutReceipt = chosen.filter((i) => decoded[i.salt] && !decoded[i.salt]!.receipt);
+  const uniform = chosen.every((i) => i.kind === chosen[0]!.kind && i.token === chosen[0]!.token);
 
   const parsedThreshold = useMemo(() => parseAmount(threshold), [threshold]);
   const enoughSelected = selected.length === BATCH;
   const claimHolds = parsedThreshold !== null && parsedThreshold <= trueTotal;
-  const canAttest = enoughSelected && parsedThreshold !== null && parsedThreshold > 0n && claimHolds;
+  const evidenceReady = enoughSelected && missing.length === 0 && withoutReceipt.length === 0;
+  const canAttest =
+    evidenceReady && uniform && parsedThreshold !== null && parsedThreshold > 0n && claimHolds;
+  const proving = circuit.stage === 'proving' || circuit.stage === 'submitting';
 
   function toggle(salt: string) {
     setSelected((cur) =>
@@ -43,15 +72,46 @@ export function AttestPage() {
 
   async function attest() {
     setError(null);
-    setStartedAt(Date.now());
+    setDigest(null);
+    circuit.reset();
+
+    // The Merkle paths come from the ledger the indexer serves, not from a
+    // local reconstruction: that is what ties each amount to a real payment.
+    let state;
     try {
-      setStage('proving');
-      throw new Error(
-        'No contract address configured. Deploy mask_pay and set VITE_CONTRACT_ADDRESS.',
-      );
+      const ledger = await readLedger();
+      const paths = chosen.map((inv) => {
+        const path = ledger.receipt_tree.findPathForLeaf(fromHex(decoded[inv.salt]!.receipt!));
+        if (path === undefined) {
+          throw new Error(
+            `The receipt for "${inv.title || 'an invoice'}" is not on the chain yet. Wait for the payment to confirm, or check the code.`,
+          );
+        }
+        return path;
+      });
+      state = {
+        ...emptyPrivateState(),
+        merchantKey: fromHex(chosen[0]!.merchantKey),
+        attestedAmounts: chosen.map((i) => BigInt(i.amount)),
+        attestedSalts: chosen.map((i) => fromHex(i.salt)),
+        attestedPayers: chosen.map((i) => fromHex(decoded[i.salt]!.payerKey)),
+        attestedIndices: chosen.map((i) => BigInt(decoded[i.salt]!.paymentIndex)),
+        attestedPaths: paths,
+      };
     } catch (e) {
-      setStage('failed');
-      setError(e instanceof Error ? e.message : String(e));
+      setError(describeChainError(e));
+      return;
+    }
+
+    try {
+      const out = (await circuit.run('attest_revenue_at_least', state, [
+        chosen[0]!.kind,
+        chosen[0]!.token,
+        parsedThreshold!,
+      ])) as { private: { result: Uint8Array } };
+      setDigest(toHex(out.private.result));
+    } catch {
+      // useCircuit surfaces the contract's own message below.
     }
   }
 
@@ -65,7 +125,7 @@ export function AttestPage() {
         <div className="mt-6 space-y-5">
           <Field
             label={`Select exactly ${BATCH} settled payments`}
-            hint={`${selected.length} of ${BATCH} selected. A circuit cannot loop over a variable number of items, so the batch size is fixed.`}
+            hint={`${selected.length} of ${BATCH} selected. A circuit cannot loop over a variable number of items, so the batch size is fixed. Each payment also needs the code its payer copied from their receipt: only the payer holds the key that names it.`}
           >
             {eligible.length === 0 ? (
               <p className="rounded-xl border border-line bg-surface-2 p-4 text-sm text-ink-dim">
@@ -76,28 +136,52 @@ export function AttestPage() {
               <div className="space-y-2">
                 {eligible.map((inv) => {
                   const on = selected.includes(inv.salt);
+                  const parsed = decoded[inv.salt];
+                  const raw = codes[inv.salt] ?? '';
                   return (
-                    <button
-                      key={inv.salt}
-                      type="button"
-                      onClick={() => toggle(inv.salt)}
-                      className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition ${
-                        on ? 'border-aurora bg-aurora/5' : 'border-line hover:border-line-bright'
-                      }`}
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm">
-                          {inv.title || 'Untitled invoice'}
+                    <div key={inv.salt} className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => toggle(inv.salt)}
+                        aria-pressed={on}
+                        className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition ${
+                          on ? 'border-aurora bg-aurora/5' : 'border-line hover:border-line-bright'
+                        }`}
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm">
+                            {inv.title || 'Untitled invoice'}
+                          </span>
+                          <span className="block text-xs text-ink-faint">
+                            {new Date(inv.createdAt).toLocaleDateString()} · {KIND_LABEL[inv.kind]}
+                          </span>
                         </span>
-                        <span className="block text-xs text-ink-faint">
-                          {new Date(inv.createdAt).toLocaleDateString()}
+                        <span className="ml-4 shrink-0 text-sm">
+                          {formatAmount(BigInt(inv.amount))}{' '}
+                          <span className="text-ink-dim">{TOKEN_LABEL[inv.token]}</span>
                         </span>
-                      </span>
-                      <span className="ml-4 shrink-0 text-sm">
-                        {formatAmount(BigInt(inv.amount))}{' '}
-                        <span className="text-ink-dim">{TOKEN_LABEL[inv.token]}</span>
-                      </span>
-                    </button>
+                      </button>
+                      {on ? (
+                        <div className="pl-2">
+                          <Input
+                            value={raw}
+                            onChange={(e) => setCodes((c) => ({ ...c, [inv.salt]: e.target.value }))}
+                            placeholder="Paste this payment's code from the payer"
+                            aria-label={`Payment code for ${inv.title || 'this invoice'}`}
+                          />
+                          {raw && !parsed ? (
+                            <p className="mt-1 text-xs text-danger">That is not a payment code.</p>
+                          ) : parsed && !parsed.receipt ? (
+                            <p className="mt-1 text-xs text-danger">
+                              This code was made before revenue proofs existed. Ask the payer to copy
+                              it again from their receipt.
+                            </p>
+                          ) : parsed ? (
+                            <p className="mt-1 text-xs text-aurora">Payment code accepted.</p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
                   );
                 })}
               </div>
@@ -114,6 +198,10 @@ export function AttestPage() {
                 Shown so you can pick a threshold. It is never published.
               </p>
             </div>
+          ) : null}
+
+          {enoughSelected && !uniform ? (
+            <ErrorNote>All four payments must be the same kind of invoice and the same asset.</ErrorNote>
           ) : null}
 
           <Field
@@ -137,7 +225,7 @@ export function AttestPage() {
           </Field>
 
           {connection.status === 'connected' ? (
-            <Button onClick={() => void attest()} disabled={!canAttest} className="w-full">
+            <Button onClick={() => void attest()} disabled={!canAttest || proving} className="w-full">
               Publish attestation
             </Button>
           ) : (
@@ -149,11 +237,26 @@ export function AttestPage() {
           {error ? <ErrorNote>{error}</ErrorNote> : null}
 
           <ProofProgress
-            stage={stage}
+            stage={circuit.stage}
             circuit="attest_revenue_at_least"
-            startedAt={startedAt}
-            error={error}
+            startedAt={circuit.startedAt}
+            error={circuit.error}
           />
+
+          {digest ? (
+            <div className="rounded-2xl border border-aurora/40 bg-aurora/5 p-5">
+              <Badge tone="aurora">attestation published</Badge>
+              <p className="mt-3 text-sm text-ink-dim">
+                The chain now holds a statement that this merchant's revenue over four payments is at
+                least {formatAmount(parsedThreshold ?? 0n)} {TOKEN_LABEL[chosen[0]?.token ?? 0]}.
+                Hand this digest to whoever needs to check it; they can verify it without a wallet.
+              </p>
+              <div className="mt-3">
+                <Digest value={digest} label="digest" />
+              </div>
+              <p className="mt-3 break-all font-mono text-xs text-aurora">{digest}</p>
+            </div>
+          ) : null}
         </div>
       </Card>
 
