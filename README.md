@@ -6,6 +6,8 @@ office exactly what they need to, without handing over a ledger.
 
 Licensed Apache-2.0. Built for the Midnight Buildathon.
 
+**Video:** [Mask, recorded through a real Lace wallet on Midnight Preview](https://youtu.be/Oa36z4e-AyM). Gift cards and Mask Card are labelled demo mode in it.
+
 ## What the chain learns
 
 | Public on the ledger | Private, held by the parties |
